@@ -15,7 +15,11 @@ async function refresh(){try{const{devices}=await api('devices');signedIn(true);
  }catch(e){if(e.status===401)signedIn(false);else $('status').textContent='中心连接中断，正在重试';}}
 $('login').onsubmit=async e=>{e.preventDefault();try{await api('login',{method:'POST',body:JSON.stringify({password:$('password').value})});$('password').value='';$('error').textContent='';refresh();}catch(e){$('error').textContent=e.message;}};
 $('devices').onchange=()=>{selected=$('devices').value;localStorage.setItem('dsh-center-device',selected);refresh();};
-$('view').onload=()=>{loadingSince=0;};
+let detachFrame=()=>{};
+const collapseMenu=()=>{$('deviceMenu').hidden=true;};
+$('view').onload=()=>{loadingSince=0;detachFrame();try{const doc=$('view').contentDocument;if(doc){doc.addEventListener('pointerdown',collapseMenu,true);doc.addEventListener('keydown',frameKey,true);detachFrame=()=>{doc.removeEventListener('pointerdown',collapseMenu,true);doc.removeEventListener('keydown',frameKey,true);};}}catch{}};
+function frameKey(e){if(e.key==='Escape')collapseMenu();}
+window.addEventListener('blur',()=>{setTimeout(()=>{if(document.activeElement===$('view'))collapseMenu();},0);});
 $('reload').onclick=()=>{loaded='';refresh();};
 $('manage').onclick=()=>$('dialog').showModal();$('close').onclick=()=>$('dialog').close();
 $('pair').onclick=async()=>{try{const b=await api('codes',{method:'POST',body:'{}'});$('code').textContent=b.code;}catch(e){$('code').textContent=e.message;}};
@@ -25,6 +29,6 @@ refresh();setInterval(refresh,5000);
 $('settingsActions').append($('reload'),$('logout'));
 $('deviceDock').onclick=()=>{$('deviceMenu').hidden=!$('deviceMenu').hidden;};
 $('settings').onclick=()=>{$('deviceMenu').hidden=true;$('dialog').showModal();};
-document.addEventListener('click',e=>{if(!e.target.closest('#deviceDock,#deviceMenu'))$('deviceMenu').hidden=true;});
+document.addEventListener('pointerdown',e=>{if(!e.target.closest('#deviceDock,#deviceMenu'))collapseMenu();},true);
 document.addEventListener('keydown',e=>{if(e.key==='Escape')$('deviceMenu').hidden=true;});
 
