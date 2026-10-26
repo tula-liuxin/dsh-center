@@ -30,6 +30,9 @@ test('authentication, pairing, isolated devices, streaming, websocket, revocatio
    const login=await api('/center/login','POST',{password:'a-long-test-password'});assert.equal(login.status,200);cookie=login.headers.get('set-cookie').split(';')[0];
    const pair=async name=>{const{code}=await(await api('/center/codes','POST',{})).json();const r=await api('/center/pair','POST',{code,name},false);assert.equal(r.status,200);assert.equal((await api('/center/pair','POST',{code,name},false)).status,401);return{...await r.json(),server:url};};
    const a=await pair('A'),b=await pair('B');
+   assert.equal((await api('/center/host-devices')).status,401);
+   const hostDevices=await(await fetch(url+'/center/host-devices',{headers:{authorization:`Bearer ${a.token}`}})).json();
+   assert.equal(hostDevices.devices.length,2);assert.ok(!JSON.stringify(hostDevices).includes('token'));
    stopA=connectHost(a,async()=>({origin:local,cookie:'local-secret'}),{retryMs:30});
    stopB=connectHost(b,async()=>({origin:local,cookie:'local-secret'}),{retryMs:30});
    for(let i=0;i<40;i++){const d=await(await api('/center/devices')).json();if(d.devices.every(x=>x.online))break;await wait(25);}

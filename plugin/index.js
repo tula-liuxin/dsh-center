@@ -31,7 +31,9 @@ export function apply(ctx) {
     const reply=(status,b)=>{res.writeHead(status,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify(b));};
     if(req.method==='GET'){
       let c={},status='未配对';try{c=JSON.parse(await readFile(file,'utf8'));status=await readFile(file+'.status','utf8');}catch{}
-      reply(200,{server:c.server||'https://dsh.agencyarche.com',name:c.name||hostname(),status});return;
+      let devices=[];
+      if(c.token&&c.server)try{const r=await fetch(new URL('/center/host-devices',c.server),{headers:{authorization:`Bearer ${c.token}`},redirect:'error',signal:AbortSignal.timeout(5000)});if(r.ok)devices=(await r.json()).devices||[];}catch{}
+      reply(200,{server:c.server||'https://dsh.agencyarche.com',name:c.name||hostname(),id:c.id,status,devices});return;
     }
     if(req.method!=='POST'){reply(405,{error:'Method not allowed'});return;}
     // Only authenticated same-origin local surfaces can pair this Host.

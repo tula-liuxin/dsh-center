@@ -38,6 +38,11 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
     try{
       const path=new URL(req.url,origin).pathname;
       if(path==='/health'){json(res,200,{ok:true});return;}
+      if(path==='/center/host-devices'&&req.method==='GET'){
+        const token=req.headers.authorization?.replace(/^Bearer /,'');
+        if(!token||!Object.values(devices).some(d=>safeEqual(d.tokenHash,hash(token)))){json(res,401,{error:'Device authentication required'});return;}
+        json(res,200,{devices:Object.values(devices).map(({id,name})=>({id,name,online:hosts.has(id)}))});return;
+      }
       if(path==='/center/login'&&req.method==='POST'){
         if(!sameOrigin(req)){json(res,403,{error:'Origin rejected'});return;}
         const key=req.socket.remoteAddress;const a=attempts.get(key)||{n:0,until:Date.now()+60000};if(a.until<Date.now()){a.n=0;a.until=Date.now()+60000;}attempts.set(key,a);
