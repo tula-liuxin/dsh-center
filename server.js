@@ -80,7 +80,9 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
       res.on('close',()=>{if(pending.has(id)){send(host,{t:'cancel',id});finish(id);}});
     }catch{if(!res.headersSent)json(res,400,{error:'请求失败'});else res.destroy();}
   });
-  const wss=new WebSocketServer({noServer:true,maxPayload:2*1024*1024});
+  // A 16 MiB DSH response expands beyond 21 MiB in the base64 tunnel envelope.
+  const wss=new WebSocketServer({noServer:true,maxPayload:24*1024*1024});
+  const browserWss=new WebSocketServer({noServer:true,maxPayload:1024*1024});
   server.on('upgrade',(req,socket,head)=>{
     const path=new URL(req.url,origin).pathname;
     const reject=()=>{socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');};
@@ -89,7 +91,7 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
       wss.handleUpgrade(req,socket,head,ws=>{
         hosts.get(d.id)?.close(1012,'Reconnected');hosts.set(d.id,ws);ws.alive=true;
         ws.on('pong',()=>ws.alive=true);
-        ws.on('error',()=>{});
+        ws.on('error',e=>console.warn('Host tunnel error',d.id,e.code||'unknown'));
         ws.on('close',()=>{if(hosts.get(d.id)===ws){hosts.delete(d.id);for(const[id,p]of pending)if(p.device===d.id)finish(id,true);}});
         ws.on('message',raw=>{try{
           const m=JSON.parse(raw),p=pending.get(m.id);if(!p||p.device!==d.id||hosts.get(d.id)!==ws)return;
@@ -114,7 +116,7 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
       });return;
     }
     const route=authorizePath(req);if(!session(req)||!sameOrigin(req)||!route||!hosts.has(route.device)||pending.size>=512){reject();return;}
-    wss.handleUpgrade(req,socket,head,ws=>{
+    browserWss.handleUpgrade(req,socket,head,ws=>{
       const id=random(),host=hosts.get(route.device);const p={device:route.device,session:sessionKey(req),ws,queue:[],ready:false,timeout:setTimeout(()=>finish(id,true),30000)};pending.set(id,p);
       send(host,{t:'ws-open',id,path:route.path,protocols:ws.protocol?[ws.protocol]:[]});
       ws.on('message',(b,binary)=>{const m={t:'ws-data',id,data:b.toString('base64'),binary};if(p.ready)send(host,m);else if(p.queue.length<64)p.queue.push(m);else ws.close(1009);});
@@ -126,7 +128,7 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
     const now=Date.now();for(const[k,t]of sessions)if(t<now)sessions.delete(k);for(const[k,c]of codes)if(c.expires<now)codes.delete(k);for(const[k,a]of attempts)if(a.until<now)attempts.delete(k);
     for(const[id,p]of pending)if(!sessions.has(p.session)){send(hosts.get(p.device),{t:'cancel',id});finish(id,true);}
   },25000);heartbeat.unref();
-  return {server,close:async()=>{clearInterval(heartbeat);for(const ws of wss.clients)ws.terminate();for(const id of pending.keys())finish(id,true);await new Promise(r=>server.close(r));await saves;}};
+  return {server,close:async()=>{clearInterval(heartbeat);for(const ws of [...wss.clients,...browserWss.clients])ws.terminate();for(const id of pending.keys())finish(id,true);await new Promise(r=>server.close(r));await saves;}};
 }
 if(process.argv[1]===fileURLToPath(import.meta.url)){
   const password=process.env.CENTER_PASSWORD_FILE? (await readFile(process.env.CENTER_PASSWORD_FILE,'utf8')).trim():process.env.CENTER_PASSWORD;

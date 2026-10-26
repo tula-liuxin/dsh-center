@@ -20,7 +20,7 @@ test('authentication, pairing, isolated devices, streaming, websocket, revocatio
    if(req.url==='/stream'){res.writeHead(200,{'content-type':'text/event-stream'});res.write('data: first\n\n');setTimeout(()=>res.end('data: second\n\n'),80);return;}
    let b='';req.on('data',x=>b+=x);req.on('end',()=>res.end(req.url+':'+b));
  });
- const local=await listen(upstream);const echo=new WebSocketServer({server:upstream});echo.on('connection',ws=>{ws.on('error',()=>{});ws.on('message',(b,binary)=>ws.send(b,{binary}));});
+ const local=await listen(upstream);const echo=new WebSocketServer({server:upstream});echo.on('connection',ws=>{ws.on('error',()=>{});ws.on('message',(b,binary)=>ws.send(b.toString()==='large-session'?'会话内容'.repeat(300000):b,{binary}));});
  let cookie;
  const api=async(path,method='GET',body,auth=true,origin='http://localhost')=>fetch(url+path,{method,headers:{origin,...(auth&&cookie?{cookie}:{}),'content-type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});
  try{
@@ -44,6 +44,12 @@ test('authentication, pairing, isolated devices, streaming, websocket, revocatio
    const stream=await api('/d/'+b.id+'/stream');const reader=stream.body.getReader();const first=await reader.read();assert.match(new TextDecoder().decode(first.value),/first/);let rest='';for(;;){const x=await reader.read();if(x.done)break;rest+=new TextDecoder().decode(x.value);}assert.match(rest,/second/);
    const ws=new WebSocket(url.replace('http:','ws:')+'/d/'+a.id+'/echo',{headers:{origin:'http://localhost',cookie}});
    await new Promise((resolve,reject)=>{ws.once('open',()=>ws.send('roundtrip'));ws.once('message',b=>{assert.equal(b.toString(),'roundtrip');ws.close();resolve();});ws.once('error',reject);});
+   const large=new WebSocket(url.replace('http:','ws:')+'/d/'+a.id+'/echo',{headers:{origin:'http://localhost',cookie}});
+   await new Promise((resolve,reject)=>{const timer=setTimeout(()=>{large.terminate();reject(Error('large session timed out'));},3000);large.once('open',()=>large.send('large-session'));large.once('message',data=>{clearTimeout(timer);assert.equal(data.toString(),'会话内容'.repeat(300000));large.close();resolve();});large.once('close',code=>{clearTimeout(timer);reject(Error('session transfer closed: '+code));});large.once('error',reject);});
+   assert.equal((await(await api('/center/devices')).json()).devices.find(x=>x.id===a.id).online,true);
+   const oversized=new WebSocket(url.replace('http:','ws:')+'/d/'+a.id+'/echo',{headers:{origin:'http://localhost',cookie}});
+   await new Promise((resolve,reject)=>{const timer=setTimeout(()=>{oversized.terminate();reject(Error('oversized request not rejected'));},2000);oversized.once('open',()=>oversized.send(Buffer.alloc(1100000)));oversized.once('close',code=>{clearTimeout(timer);assert.equal(code,1009);resolve();});oversized.once('error',reject);});
+   assert.equal((await(await api('/center/devices')).json()).devices.find(x=>x.id===a.id).online,true);
    const active=new WebSocket(url.replace('http:','ws:')+'/d/'+b.id+'/echo',{headers:{origin:'http://localhost',cookie}});
    await new Promise((resolve,reject)=>{active.once('open',resolve);active.once('error',reject);});
    const closed=new Promise((resolve,reject)=>{const timer=setTimeout(()=>{active.terminate();reject(Error('logout did not close existing socket'));},2000);active.once('close',()=>{clearTimeout(timer);resolve();});});
