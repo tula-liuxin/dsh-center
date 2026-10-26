@@ -19,7 +19,16 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
   let devices={};try{devices=JSON.parse(await readFile(store,'utf8'));}catch(e){if(e.code!=='ENOENT')throw e;}
   let saves=Promise.resolve();
   const save=()=>{const data=JSON.stringify(devices);saves=saves.then(async()=>{await writeFile(store+'.tmp',data,{mode:0o600});await rename(store+'.tmp',store);});return saves;};
-  const sessions=new Map(),codes=new Map(),hosts=new Map(),pending=new Map(),attempts=new Map();
+  const authStore=join(dataDir,'sessions.json');
+  let savedAuth;try{savedAuth=JSON.parse(await readFile(authStore,'utf8'));}catch(e){if(e.code!=='ENOENT')throw e;}
+  const authSalt=savedAuth?.salt||randomBytes(16).toString('hex');
+  const authVerifier=scryptSync(password,authSalt,32).toString('hex');
+  const sessions=new Map(savedAuth?.verifier===authVerifier ? (savedAuth.sessions||[]).filter(([key,expires])=>typeof key==='string'&&Number.isFinite(expires)&&expires>Date.now()) : []);
+  const codes=new Map(),hosts=new Map(),pending=new Map(),attempts=new Map();
+  let authSaves=Promise.resolve();
+  const saveSessions=()=>{const data=JSON.stringify({salt:authSalt,verifier:authVerifier,sessions:[...sessions]});authSaves=authSaves.catch(()=>{}).then(async()=>{await writeFile(authStore+'.tmp',data,{mode:0o600});await rename(authStore+'.tmp',authStore);});return authSaves;};
+  await saveSessions();
+
   const json=(res,status,data)=>{res.writeHead(status,{'content-type':'application/json; charset=utf-8','cache-control':'no-store'});res.end(JSON.stringify(data));};
   const sessionKey=req=>{
     const value=req.headers.cookie?.split(';').map(x=>x.trim()).find(x=>x.startsWith('center_session='))?.slice(15);
@@ -49,8 +58,8 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
         if(++a.n>10){json(res,429,{error:'请稍后重试'});return;}
         const body=await read(req);const result=scryptSync(String(body.password||''),salt,32);
         if(!timingSafeEqual(result,passwordHash)){json(res,401,{error:'密码不正确'});return;}
-        const token=random();sessions.set(hash(token),Date.now()+7*86400000);
-        res.setHeader('set-cookie',`center_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800${secure?'; Secure':''}`);json(res,200,{ok:true});return;
+        const token=random();sessions.set(hash(token),Date.now()+30*86400000);await saveSessions();
+        res.setHeader('set-cookie',`center_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000${secure?'; Secure':''}`);json(res,200,{ok:true});return;
       }
       if(path==='/center/pair'&&req.method==='POST'){
         const b=await read(req),key=hash(String(b.code||'')),code=codes.get(key);
@@ -65,7 +74,7 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
       if(!['GET','HEAD'].includes(req.method)&&!sameOrigin(req)){json(res,403,{error:'Origin rejected'});return;}
       if(path==='/center/devices'&&req.method==='GET'){json(res,200,{devices:Object.values(devices).map(({tokenHash,...d})=>({...d,online:hosts.has(d.id)}))});return;}
       if(path==='/center/logout'&&req.method==='POST'){
-        const value=req.headers.cookie?.split(';').map(x=>x.trim()).find(x=>x.startsWith('center_session='))?.slice(15);if(value)sessions.delete(hash(value));
+        const value=req.headers.cookie?.split(';').map(x=>x.trim()).find(x=>x.startsWith('center_session='))?.slice(15);if(value)sessions.delete(hash(value));await saveSessions();
         for(const[id,p]of pending)if(p.session===sessionKey(req)){send(hosts.get(p.device),{t:'cancel',id});finish(id,true);}
         res.setHeader('set-cookie',`center_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure?'; Secure':''}`);json(res,200,{ok:true});return;
       }
@@ -133,7 +142,7 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
     const now=Date.now();for(const[k,t]of sessions)if(t<now)sessions.delete(k);for(const[k,c]of codes)if(c.expires<now)codes.delete(k);for(const[k,a]of attempts)if(a.until<now)attempts.delete(k);
     for(const[id,p]of pending)if(!sessions.has(p.session)){send(hosts.get(p.device),{t:'cancel',id});finish(id,true);}
   },25000);heartbeat.unref();
-  return {server,close:async()=>{clearInterval(heartbeat);for(const ws of [...wss.clients,...browserWss.clients])ws.terminate();for(const id of pending.keys())finish(id,true);await new Promise(r=>server.close(r));await saves;}};
+  return {server,close:async()=>{clearInterval(heartbeat);for(const ws of [...wss.clients,...browserWss.clients])ws.terminate();for(const id of pending.keys())finish(id,true);await new Promise(r=>server.close(r));await saves;await authSaves;}};
 }
 if(process.argv[1]===fileURLToPath(import.meta.url)){
   const password=process.env.CENTER_PASSWORD_FILE? (await readFile(process.env.CENTER_PASSWORD_FILE,'utf8')).trim():process.env.CENTER_PASSWORD;

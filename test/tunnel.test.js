@@ -77,3 +77,18 @@ test('host reconnects when center stops sending heartbeats without closing TCP',
   assert.ok(statuses.some(s=>s.includes('已断开')));
  }finally{stop();for(const ws of wss.clients)ws.terminate();await new Promise(r=>wss.close(r));await new Promise(r=>server.close(r));}
 });
+
+
+test('browser login survives restart, logout persists, password change revokes sessions', async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'center-auth-test-'));let center;
+ const boot=async(password='a-long-test-password')=>{center=await createCenter({password,publicUrl:'http://localhost',dataDir:dir,secure:false});return listen(center.server);};
+ const login=async url=>{const r=await fetch(url+'/center/login',{method:'POST',headers:{origin:'http://localhost','content-type':'application/json'},body:JSON.stringify({password:'a-long-test-password'})});assert.equal(r.status,200);assert.match(r.headers.get('set-cookie'),/Max-Age=2592000/);return r.headers.get('set-cookie').split(';')[0];};
+ const check=(url,cookie)=>fetch(url+'/center/devices',{headers:{cookie}});
+ try{
+  let url=await boot();let cookie=await login(url);await center.close();
+  url=await boot();assert.equal((await check(url,cookie)).status,200);
+  assert.equal((await fetch(url+'/center/logout',{method:'POST',headers:{cookie,origin:'http://localhost'}})).status,200);await center.close();
+  url=await boot();assert.equal((await check(url,cookie)).status,401);cookie=await login(url);await center.close();
+  url=await boot('a-different-long-password');assert.equal((await check(url,cookie)).status,401);
+ }finally{await center.close();await rm(dir,{recursive:true,force:true});}
+});
