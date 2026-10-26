@@ -4,6 +4,7 @@ import {readFile,mkdir,writeFile,rename} from 'node:fs/promises';
 import {dirname,join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {WebSocketServer,WebSocket} from 'ws';
+import {createGzip} from 'node:zlib';
 
 const here=dirname(fileURLToPath(import.meta.url));
 const hash=x=>createHash('sha256').update(x).digest('hex');
@@ -28,7 +29,7 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
   const sameOrigin=req=>req.headers.origin===origin;
   const read=async req=>{let text='';for await(const b of req){text+=b;if(Buffer.byteLength(text)>8192)throw Error('Body too large');}return JSON.parse(text||'{}');};
   function send(ws,m){if(ws?.readyState!==WebSocket.OPEN)return false;if(ws.bufferedAmount>16*1024*1024){ws.terminate();return false;}ws.send(JSON.stringify(m));return true;}
-  function finish(id,error=false){const p=pending.get(id);if(!p)return;pending.delete(id);clearTimeout(p.timeout);if(error){if(p.res){if(!p.res.headersSent)json(p.res,502,{error:'设备连接中断，请重新连接'});else p.res.destroy();}else p.ws?.close(1011,'Device disconnected');}}
+  function finish(id,error=false){const p=pending.get(id);if(!p)return;pending.delete(id);clearTimeout(p.timeout);if(error){p.output?.destroy();if(p.res){if(!p.res.headersSent)json(p.res,502,{error:'设备连接中断，请重新连接'});else p.res.destroy();}else p.ws?.close(1011,'Device disconnected');}}
   function authorizePath(req){const u=new URL(req.url,origin);const match=/^\/d\/([a-f0-9]{24})(\/.*)$/.exec(u.pathname);return match&&{device:match[1],path:match[2]+u.search};}
   const app=await readFile(join(here,'web/index.html'));
   const js=await readFile(join(here,'web/app.js'));
@@ -71,7 +72,7 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
       if(!route||!devices[route.device]){json(res,404,{error:'Not found'});return;}
       const host=hosts.get(route.device);if(!host){json(res,503,{error:'设备离线；不会自动切换到其他电脑'});return;}
       if(pending.size>=512){json(res,503,{error:'连接过多，请稍后重试'});return;}
-      const id=random();const p={device:route.device,session:sessionKey(req),res,timeout:setTimeout(()=>{send(host,{t:'cancel',id});finish(id,true);},45000)};pending.set(id,p);
+      const id=random();const p={device:route.device,session:sessionKey(req),res,path:route.path,acceptEncoding:req.headers['accept-encoding']||'',timeout:setTimeout(()=>{send(host,{t:'cancel',id});finish(id,true);},45000)};pending.set(id,p);
       send(host,{t:'request',id,path:route.path,method:req.method,headers:req.headers});
       let bytes=0;req.on('data',b=>{bytes+=b.length;if(bytes>32*1024*1024){send(host,{t:'cancel',id});finish(id,true);req.destroy();return;}send(host,{t:'data',id,data:b.toString('base64')});});
       req.on('end',()=>send(host,{t:'end',id}));
@@ -92,9 +93,19 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
         ws.on('close',()=>{if(hosts.get(d.id)===ws){hosts.delete(d.id);for(const[id,p]of pending)if(p.device===d.id)finish(id,true);}});
         ws.on('message',raw=>{try{
           const m=JSON.parse(raw),p=pending.get(m.id);if(!p||p.device!==d.id||hosts.get(d.id)!==ws)return;
-          if(m.t==='headers'&&p.res){clearTimeout(p.timeout);if(!Number.isInteger(m.status)||m.status<100||m.status>599)throw Error();p.res.writeHead(m.status,m.headers);}
-          else if(m.t==='chunk'&&p.res){if(p.res.writableLength>16*1024*1024){send(ws,{t:'cancel',id:m.id});finish(m.id,true);return;}p.res.write(Buffer.from(m.data,'base64'));}
-          else if(m.t==='end'&&p.res){p.res.end();finish(m.id);}
+          if(m.t==='headers'&&p.res){
+            clearTimeout(p.timeout);if(!Number.isInteger(m.status)||m.status<100||m.status>599)throw Error();
+            const headers={...m.headers};
+            const staticAsset=m.status===200 && /^\/(?:assets|plugins)\//.test(p.path) && /javascript|text\/css|image\/svg\+xml/.test(headers['content-type']||'');
+            if(staticAsset){
+              headers.vary='Accept-Encoding';
+              if(/[?&]rev=[a-f0-9]+(?:&|$)/.test(p.path)||/^\/assets\/[^?]+-[\w-]+\.(?:js|css)(?:\?|$)/.test(p.path))headers['cache-control']='private, max-age=3600';
+              if(/\bgzip\b/.test(p.acceptEncoding)&&!headers['content-encoding']){headers['content-encoding']='gzip';delete headers['content-length'];p.output=createGzip();p.output.on('error',()=>finish(m.id,true));p.output.pipe(p.res);}
+            }
+            p.res.writeHead(m.status,headers);
+          }
+          else if(m.t==='chunk'&&p.res){const output=p.output||p.res;if(output.writableLength>16*1024*1024||p.res.writableLength>16*1024*1024){send(ws,{t:'cancel',id:m.id});finish(m.id,true);return;}output.write(Buffer.from(m.data,'base64'));}
+          else if(m.t==='end'&&p.res){(p.output||p.res).end();finish(m.id);}
           else if(m.t==='error')finish(m.id,true);
           else if(m.t==='ws-data'&&p.ws?.readyState===WebSocket.OPEN){if(p.ws.bufferedAmount>16*1024*1024)finish(m.id,true);else p.ws.send(Buffer.from(m.data,'base64'),{binary:m.binary});}
           else if(m.t==='ws-open'){clearTimeout(p.timeout);p.ready=true;for(const b of p.queue||[])send(ws,b);p.queue=[];}

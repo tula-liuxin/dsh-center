@@ -16,6 +16,7 @@ test('authentication, pairing, isolated devices, streaming, websocket, revocatio
  const upstream=http.createServer((req,res)=>{
    assert.equal(req.headers.cookie,'local-secret');assert.equal(req.headers.authorization,undefined);
    if(req.url==='/'){res.setHeader('content-type','text/html');res.end('<html><head></head><body>DSH</body></html>');return;}
+   if(req.url==='/assets/test-abcdef.js'){res.setHeader('content-type','text/javascript');res.end('/* representative script */\n'.repeat(100000));return;}
    if(req.url==='/stream'){res.writeHead(200,{'content-type':'text/event-stream'});res.write('data: first\n\n');setTimeout(()=>res.end('data: second\n\n'),80);return;}
    let b='';req.on('data',x=>b+=x);req.on('end',()=>res.end(req.url+':'+b));
  });
@@ -36,6 +37,9 @@ test('authentication, pairing, isolated devices, streaming, websocket, revocatio
    assert.equal((await api('/d/'+a.id+'/hello','GET',undefined,false)).status,401);
    assert.match(await(await api('/d/'+a.id+'/')).text(),/__DSH_TRANSPORT__=\{ownsHost:true\}/);
    assert.equal((await api('/d/'+a.id+'/center-host/setup')).status,403);
+   const asset=await fetch(url+'/d/'+a.id+'/assets/test-abcdef.js',{headers:{cookie,'accept-encoding':'gzip'}});
+   assert.equal(asset.headers.get('content-encoding'),'gzip');assert.match(asset.headers.get('cache-control'),/private/);
+   assert.equal(await asset.text(),'/* representative script */\n'.repeat(100000));
    assert.equal(await(await api('/d/'+a.id+'/hello?q=1','POST',{hello:'world'})).text(),'/hello?q=1:{"hello":"world"}');
    const stream=await api('/d/'+b.id+'/stream');const reader=stream.body.getReader();const first=await reader.read();assert.match(new TextDecoder().decode(first.value),/first/);let rest='';for(;;){const x=await reader.read();if(x.done)break;rest+=new TextDecoder().decode(x.value);}assert.match(rest,/second/);
    const ws=new WebSocket(url.replace('http:','ws:')+'/d/'+a.id+'/echo',{headers:{origin:'http://localhost',cookie}});
