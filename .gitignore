@@ -1,0 +1,6 @@
+node_modules/
+data/
+secrets/
+*.tgz
+.env
+compose.override.yml

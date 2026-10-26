@@ -1,0 +1,30 @@
+services:
+  center:
+    build: .
+    restart: unless-stopped
+    environment:
+      CENTER_PUBLIC_URL: https://dsh.agencyarche.com
+      CENTER_PASSWORD_FILE: /run/secrets/password
+      CENTER_DATA: /data
+      LISTEN_HOST: 0.0.0.0
+      PORT: 4320
+    volumes:
+      - ./data:/data
+      - ./secrets/password:/run/secrets/password:ro
+    ports:
+      - 127.0.0.1:4320:4320
+    mem_limit: 384m
+    cpus: 0.5
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      default:
+      edge:
+        aliases:
+          - dsh-center
+networks:
+  edge:
+    external: true
+    name: co-align-v2_default

@@ -1,0 +1,7 @@
+node_modules
+plugin
+test
+data
+secrets
+.git
+*.tgz
