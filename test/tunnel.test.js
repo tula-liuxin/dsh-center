@@ -63,3 +63,17 @@ test('authentication, pairing, isolated devices, streaming, websocket, revocatio
    stopB();await wait(50);assert.equal((await api('/d/'+b.id+'/hello')).status,503);
  }finally{stopA();stopB();echo.close();await new Promise(r=>upstream.close(r));await center.close();await rm(dir,{recursive:true,force:true});}
 });
+
+
+test('host reconnects when center stops sending heartbeats without closing TCP', async()=>{
+ const server=http.createServer();const url=await listen(server);
+ const wss=new WebSocketServer({server});let connections=0;const statuses=[];
+ wss.on('connection',ws=>{connections++;ws.on('error',()=>{});});
+ const stop=connectHost({server:url,token:'test'},async()=>({origin:url,cookie:'test'}),{heartbeatTimeoutMs:80,retryMs:10,onStatus:s=>statuses.push(s)});
+ try{
+  for(let i=0;i<100&&connections<2;i++)await wait(25);
+  assert.ok(connections>=2,'silent connection must reconnect');
+  assert.ok(statuses.some(s=>s.includes('心跳超时')));
+  assert.ok(statuses.some(s=>s.includes('已断开')));
+ }finally{stop();for(const ws of wss.clients)ws.terminate();await new Promise(r=>wss.close(r));await new Promise(r=>server.close(r));}
+});

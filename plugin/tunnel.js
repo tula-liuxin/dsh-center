@@ -3,11 +3,16 @@ import https from 'node:https';
 import WebSocket from 'ws';
 
 const MAX_QUEUE = 16 * 1024 * 1024;
-export function connectHost(config, getLocal, {retryMs = 3000, onStatus = () => {}} = {}) {
+export function connectHost(config, getLocal, {retryMs = 3000, heartbeatTimeoutMs = 70000, onStatus = () => {}} = {}) {
   const endpoint = new URL('/center/host', config.server);
   if (endpoint.protocol !== 'https:' && !(endpoint.protocol === 'http:' && ['127.0.0.1','localhost'].includes(endpoint.hostname))) throw Error('Center must use HTTPS');
   endpoint.protocol = endpoint.protocol === 'https:' ? 'wss:' : 'ws:';
-  let stopped = false, ws, timer;
+  let stopped = false, ws, timer, heartbeat;
+  function armHeartbeat(socket) {
+    clearTimeout(heartbeat);
+    heartbeat = setTimeout(() => { onStatus("连接心跳超时，正在重连"); socket.terminate(); }, heartbeatTimeoutMs);
+    heartbeat.unref?.();
+  }
   const active = new Map();
   function send(m) {
     if (ws?.readyState !== WebSocket.OPEN) return;
@@ -19,10 +24,14 @@ export function connectHost(config, getLocal, {retryMs = 3000, onStatus = () => 
     let local;
     try { local = await getLocal(); } catch(e) { onStatus('Local connection: '+e.message); timer = setTimeout(dial, retryMs); return; }
     if (stopped) return;
-    ws = new WebSocket(endpoint, {headers: {authorization: `Bearer ${config.token}`}, maxPayload: 2 * 1024 * 1024});
-    ws.on('open', () => onStatus('online'));
+    ws = new WebSocket(endpoint, {headers: {authorization: `Bearer ${config.token}`}, maxPayload: 2 * 1024 * 1024, handshakeTimeout: 15000});
+    const socket = ws;
+    ws.on('open', () => { onStatus('online'); armHeartbeat(socket); });
+    ws.on('ping', () => armHeartbeat(socket));
     ws.on('error', e => onStatus('Center connection: '+e.message));
     ws.on('close', () => {
+      clearTimeout(heartbeat);
+      if (!stopped) onStatus('连接已断开，正在重连');
       for (const r of active.values()) { r.destroy?.(); r.terminate?.(); }
       active.clear();
       if (!stopped) timer = setTimeout(dial, retryMs + Math.random() * 1000);
@@ -74,5 +83,5 @@ export function connectHost(config, getLocal, {retryMs = 3000, onStatus = () => 
     });
   }
   dial();
-  return () => { stopped=true;clearTimeout(timer);ws?.terminate();for(const r of active.values()){r.destroy?.();r.terminate?.();}active.clear(); };
+  return () => { stopped=true;clearTimeout(timer);clearTimeout(heartbeat);ws?.terminate();for(const r of active.values()){r.destroy?.();r.terminate?.();}active.clear(); };
 }

@@ -19,7 +19,7 @@ export function apply(ctx) {
     if (disposed || current !== generation) return;
     stop = connectHost(config, async () => {
       const origin = ctx.webServer.getOrigin();
-      const r = await fetch(ctx.connection.authenticatedUrl(origin + '/'), {redirect: 'manual'});
+      const r = await fetch(ctx.connection.authenticatedUrl(origin + '/'), {redirect: 'manual', signal: AbortSignal.timeout(10000)});
       const cookies = r.headers.getSetCookie().map(x => x.split(';')[0]).join('; ');
       if (!cookies) throw new Error('DSH local authentication unavailable');
       return {origin, cookie: cookies};
