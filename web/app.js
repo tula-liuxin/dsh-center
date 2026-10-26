@@ -1,3 +1,23 @@
+function alignDeviceDock(button, menu, doc, frame=null) {
+  let timer=0, stopped=false;
+  const win=doc.defaultView;
+  const update=()=>{
+    timer=0;if(stopped)return;
+    const candidates=[...doc.querySelectorAll('button,[role="button"],span')].filter(el=>/^(?:[⋯…]\s*)?(?:更多|More)$/.test(el.textContent.trim())).map(el=>el.closest('button,[role="button"]')||el.parentElement).filter(Boolean);
+    const rows=candidates.map(el=>el.getBoundingClientRect()).filter(r=>r.width>70&&r.width<500&&r.height>15&&r.height<80&&r.left<100&&r.top>win.innerHeight*.6);
+    rows.sort((a,b)=>b.bottom-a.bottom);const row=rows[0];
+    if(!row){button.style.removeProperty('top');button.style.removeProperty('left');button.style.removeProperty('bottom');menu.style.removeProperty('bottom');return;}
+    const offset=frame?frame.getBoundingClientRect():{left:0,top:0};
+    const x=offset.left+row.right-30, y=offset.top+row.top+(row.height-26)/2;
+    button.style.left=x+'px';button.style.top=y+'px';button.style.bottom='auto';
+    menu.style.bottom=Math.max(12,window.innerHeight-y+8)+'px';
+  };
+  const schedule=()=>{if(!timer&&!stopped)timer=setTimeout(update,80);};
+  const observer=new MutationObserver(schedule);observer.observe(doc.body,{childList:true,subtree:true});
+  const resize=new ResizeObserver(schedule);resize.observe(doc.documentElement);
+  window.addEventListener('resize',schedule);doc.addEventListener('scroll',schedule,true);update();
+  return ()=>{stopped=true;clearTimeout(timer);observer.disconnect();resize.disconnect();window.removeEventListener('resize',schedule);doc.removeEventListener('scroll',schedule,true);};
+}
 const $=id=>document.getElementById(id);
 let settingsRequested=new URLSearchParams(location.search).has('settings');
 let selected=new URLSearchParams(location.search).get('device')||localStorage.getItem('dsh-center-device')||'', loaded='',previousOnline=false,loadingSince=0;
@@ -17,7 +37,7 @@ $('login').onsubmit=async e=>{e.preventDefault();try{await api('login',{method:'
 $('devices').onchange=()=>{selected=$('devices').value;localStorage.setItem('dsh-center-device',selected);refresh();};
 let detachFrame=()=>{};
 const collapseMenu=()=>{$('deviceMenu').hidden=true;};
-$('view').onload=()=>{loadingSince=0;detachFrame();try{const doc=$('view').contentDocument;if(doc){doc.addEventListener('pointerdown',collapseMenu,true);doc.addEventListener('keydown',frameKey,true);detachFrame=()=>{doc.removeEventListener('pointerdown',collapseMenu,true);doc.removeEventListener('keydown',frameKey,true);};}}catch{}};
+$('view').onload=()=>{loadingSince=0;detachFrame();try{const doc=$('view').contentDocument;if(doc){const stopAlign=alignDeviceDock($('deviceDock'),$('deviceMenu'),doc,$('view'));doc.addEventListener('pointerdown',collapseMenu,true);doc.addEventListener('keydown',frameKey,true);detachFrame=()=>{stopAlign();doc.removeEventListener('pointerdown',collapseMenu,true);doc.removeEventListener('keydown',frameKey,true);};}}catch{}};
 function frameKey(e){if(e.key==='Escape')collapseMenu();}
 window.addEventListener('blur',()=>{setTimeout(()=>{if(document.activeElement===$('view'))collapseMenu();},0);});
 $('reload').onclick=()=>{loaded='';refresh();};
