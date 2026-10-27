@@ -42,6 +42,10 @@ test('authentication, pairing, isolated devices, streaming, websocket, revocatio
    assert.equal((await api('/center/devices/'+a.id+'/remark','PUT',{remark:'  '})).status,200);
    assert.equal((await(await api('/center/devices')).json()).devices.find(d=>d.id===a.id).name,'A');
    assert.equal(hostDevices.devices.length,2);assert.ok(!JSON.stringify(hostDevices).includes('token'));
+   // Old hosts already offer deflate; the center negotiates it without an upgrade.
+   const probe=new WebSocket(url.replace('http:','ws:')+'/center/host',{headers:{authorization:`Bearer ${a.token}`}});
+   await new Promise((resolve,reject)=>{probe.once('open',resolve);probe.once('error',reject)});
+   assert.match(probe.extensions,/permessage-deflate/);probe.close();
    stopA=connectHost(a,async()=>({origin:local,cookie:'local-secret'}),{retryMs:30});
    stopB=connectHost(b,async()=>({origin:local,cookie:'local-secret'}),{retryMs:30});
    for(let i=0;i<40;i++){const d=await(await api('/center/devices')).json();if(d.devices.every(x=>x.online))break;await wait(25);}

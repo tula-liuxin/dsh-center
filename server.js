@@ -102,7 +102,7 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
     }catch{if(!res.headersSent)json(res,400,{error:'请求失败'});else res.destroy();}
   });
   // A 16 MiB DSH response expands beyond 21 MiB in the base64 tunnel envelope.
-  const wss=new WebSocketServer({noServer:true,maxPayload:24*1024*1024});
+  const wss=new WebSocketServer({noServer:true,maxPayload:24*1024*1024,perMessageDeflate:{threshold:1024,serverNoContextTakeover:true,clientNoContextTakeover:true,concurrencyLimit:2,zlibDeflateOptions:{level:3}}});
   const browserWss=new WebSocketServer({noServer:true,maxPayload:1024*1024});
   server.on('upgrade',(req,socket,head)=>{
     const path=new URL(req.url,origin).pathname;
