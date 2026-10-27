@@ -32,6 +32,15 @@ test('authentication, pairing, isolated devices, streaming, websocket, revocatio
    const a=await pair('A'),b=await pair('B');
    assert.equal((await api('/center/host-devices')).status,401);
    const hostDevices=await(await fetch(url+'/center/host-devices',{headers:{authorization:`Bearer ${a.token}`}})).json();
+   assert.equal((await api('/center/devices/'+a.id+'/remark','PUT',{remark:'家里电脑'},false)).status,401);
+   assert.equal((await api('/center/devices/'+a.id+'/remark','PUT',{remark:'家里电脑'},true,'https://evil.test')).status,403);
+   assert.equal((await api('/center/devices/'+a.id+'/remark','PUT',{remark:'家里电脑'})).status,200);
+   const renamed=await(await fetch(url+'/center/host-devices',{headers:{authorization:`Bearer ${a.token}`}})).json();
+   assert.equal(renamed.devices.find(d=>d.id===a.id).name,'家里电脑');assert.equal(renamed.devices.find(d=>d.id===a.id).originalName,'A');
+   assert.equal(JSON.parse(await (await import('node:fs/promises')).readFile(join(dir,'devices.json'),'utf8'))[a.id].remark,'家里电脑');
+   assert.equal((await api('/center/devices/'+a.id+'/remark','PUT',{remark:'x'.repeat(61)})).status,400);
+   assert.equal((await api('/center/devices/'+a.id+'/remark','PUT',{remark:'  '})).status,200);
+   assert.equal((await(await api('/center/devices')).json()).devices.find(d=>d.id===a.id).name,'A');
    assert.equal(hostDevices.devices.length,2);assert.ok(!JSON.stringify(hostDevices).includes('token'));
    stopA=connectHost(a,async()=>({origin:local,cookie:'local-secret'}),{retryMs:30});
    stopB=connectHost(b,async()=>({origin:local,cookie:'local-secret'}),{retryMs:30});

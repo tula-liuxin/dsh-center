@@ -50,7 +50,7 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
       if(path==='/center/host-devices'&&req.method==='GET'){
         const token=req.headers.authorization?.replace(/^Bearer /,'');
         if(!token||!Object.values(devices).some(d=>safeEqual(d.tokenHash,hash(token)))){json(res,401,{error:'Device authentication required'});return;}
-        json(res,200,{devices:Object.values(devices).map(({id,name})=>({id,name,online:hosts.has(id)}))});return;
+        json(res,200,{devices:Object.values(devices).map(({id,name,remark})=>({id,name:remark||name,originalName:name,remark:remark||'',online:hosts.has(id)}))});return;
       }
       if(path==='/center/login'&&req.method==='POST'){
         if(!sameOrigin(req)){json(res,403,{error:'Origin rejected'});return;}
@@ -72,13 +72,20 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
       }
       if(!session(req)){json(res,401,{error:'请登录设备中心'});return;}
       if(!['GET','HEAD'].includes(req.method)&&!sameOrigin(req)){json(res,403,{error:'Origin rejected'});return;}
-      if(path==='/center/devices'&&req.method==='GET'){json(res,200,{devices:Object.values(devices).map(({tokenHash,...d})=>({...d,online:hosts.has(d.id)}))});return;}
+      if(path==='/center/devices'&&req.method==='GET'){json(res,200,{devices:Object.values(devices).map(({tokenHash,...d})=>({...d,name:d.remark||d.name,originalName:d.name,remark:d.remark||'',online:hosts.has(d.id)}))});return;}
       if(path==='/center/logout'&&req.method==='POST'){
         const value=req.headers.cookie?.split(';').map(x=>x.trim()).find(x=>x.startsWith('center_session='))?.slice(15);if(value)sessions.delete(hash(value));await saveSessions();
         for(const[id,p]of pending)if(p.session===sessionKey(req)){send(hosts.get(p.device),{t:'cancel',id});finish(id,true);}
         res.setHeader('set-cookie',`center_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure?'; Secure':''}`);json(res,200,{ok:true});return;
       }
       if(path==='/center/codes'&&req.method==='POST'){const code=randomBytes(16).toString('hex');codes.set(hash(code),{expires:Date.now()+600000});json(res,200,{code,expiresIn:600});return;}
+      const remarkRoute=/^\/center\/devices\/([a-f0-9]{24})\/remark$/.exec(path);
+      if(remarkRoute&&req.method==='PUT'){
+        const device=devices[remarkRoute[1]];if(!device){json(res,404,{error:'设备不存在'});return;}
+        const body=await read(req);
+        if(typeof body.remark!=='string'||body.remark.trim().length>60){json(res,400,{error:'备注名最多 60 个字符'});return;}
+        device.remark=body.remark.trim();await save();json(res,200,{ok:true});return;
+      }
       if(path.startsWith('/center/devices/')&&req.method==='DELETE'){
         const id=path.split('/').pop();hosts.get(id)?.close(1008,'Revoked');hosts.delete(id);delete devices[id];await save();json(res,200,{ok:true});return;
       }
