@@ -22,13 +22,13 @@ export function connectHost(config, getLocal, {retryMs = 3000, heartbeatTimeoutM
   async function dial() {
     if (stopped) return;
     let local;
-    try { local = await getLocal(); } catch(e) { onStatus('Local connection: '+e.message); timer = setTimeout(dial, retryMs); return; }
+    try { local = await getLocal(); } catch(e) { if(!stopped){onStatus('本机 DSH 连接中断，正在重试'); timer = setTimeout(dial, retryMs);} return; }
     if (stopped) return;
     ws = new WebSocket(endpoint, {headers: {authorization: `Bearer ${config.token}`}, maxPayload: 2 * 1024 * 1024, handshakeTimeout: 15000});
     const socket = ws;
     ws.on('open', () => { onStatus('online'); armHeartbeat(socket); });
     ws.on('ping', () => armHeartbeat(socket));
-    ws.on('error', e => onStatus('Center connection: '+e.message));
+    ws.on('error', e => {if(!stopped)onStatus('中心连接中断，正在重连：'+e.message);});
     ws.on('close', () => {
       clearTimeout(heartbeat);
       if (!stopped) onStatus('连接已断开，正在重连');
@@ -36,7 +36,8 @@ export function connectHost(config, getLocal, {retryMs = 3000, heartbeatTimeoutM
       active.clear();
       if (!stopped) timer = setTimeout(dial, retryMs + Math.random() * 1000);
     });
-    ws.on('message', raw => {
+    ws.on('message', async raw => {
+      if(stopped || ws!==socket)return;
       try {
         const m = JSON.parse(raw);
         if (m.t === 'cancel') { active.get(m.id)?.destroy?.(); active.get(m.id)?.terminate?.(); active.delete(m.id); return; }
@@ -51,11 +52,15 @@ export function connectHost(config, getLocal, {retryMs = 3000, heartbeatTimeoutM
         const headers = {cookie: local.cookie, origin: local.origin};
         for (const key of ['content-type','accept','range','last-event-id']) if (typeof m.headers?.[key] === 'string') headers[key] = m.headers[key];
         if (m.t === 'ws-open') {
+          // Refresh local authentication for each reconnect; desktop cookies can expire.
+          const fresh=await getLocal();
+          if(stopped || ws!==socket || socket.readyState!==WebSocket.OPEN)return;
+          headers.cookie=fresh.cookie;
           target.protocol = target.protocol === 'https:' ? 'wss:' : 'ws:';
           const s = new WebSocket(target, m.protocols || [], {headers, maxPayload: MAX_QUEUE}); active.set(m.id,s);
           s.on('open', () => send({t:'ws-open',id:m.id}));
           s.on('message', (data,binary) => send({t:'ws-data',id:m.id,data:data.toString('base64'),binary}));
-          s.on('error', () => {});
+          s.on('error', e => {if(!stopped)onStatus('本机会话连接重试：'+e.message);});
           s.on('close', () => {active.delete(m.id);send({t:'ws-close',id:m.id});});
           return;
         }
@@ -70,7 +75,13 @@ export function connectHost(config, getLocal, {retryMs = 3000, heartbeatTimeoutM
           const parts=[];let size=0;
           res.on('data', b => {
             if(index){size+=b.length;if(size>2*1024*1024){r.destroy();return;}parts.push(b);}
-            else send({t:'chunk',id:m.id,data:b.toString('base64')});
+            else {
+              // Pause disk/HTTP reads until this chunk has left the tunnel queue.
+              // Large scripts must not fill the shared queue and disconnect every session.
+              res.pause();
+              if(socket.readyState===WebSocket.OPEN)socket.send(JSON.stringify({t:'chunk',id:m.id,data:b.toString('base64')}),error=>{if(error)r.destroy();else res.resume();});
+              else r.destroy();
+            }
           });
           res.on('end', () => {
             if(index){const html=Buffer.concat(parts).toString('utf8').replace(/<head(?:\s[^>]*)?>/i,open=>open+'<script>globalThis.__DSH_TRANSPORT__={ownsHost:true};</script>');send({t:'chunk',id:m.id,data:Buffer.from(html).toString('base64')});}

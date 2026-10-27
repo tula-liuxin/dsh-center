@@ -8,7 +8,7 @@ export const inject = ['webServer', 'connection'];
 export function apply(ctx) {
   let stop = () => {}, disposed = false, generation = 0;
   const file = process.env.DSH_CENTER_CONFIG || join(homedir(), '.dsh-center', 'host.json');
-  ctx.on('dispose', () => { disposed = true; generation++; stop(); unwatchFile(file, onChange); });
+  ctx.effect(() => () => { disposed = true; generation++; stop(); unwatchFile(file, onChange); });
   // Do not change Desktop's listener, authentication, storage, or other plugins.
   const start = async () => {
     const current = ++generation;
@@ -23,7 +23,7 @@ export function apply(ctx) {
       const cookies = r.headers.getSetCookie().map(x => x.split(';')[0]).join('; ');
       if (!cookies) throw new Error('DSH local authentication unavailable');
       return {origin, cookie: cookies};
-    }, {onStatus: status => { writeFile(file+'.status',status,{mode:0o600}).catch(()=>{}); }});
+    }, {onStatus: status => { if(!disposed&&current===generation)writeFile(file+'.status',status,{mode:0o600}).catch(()=>{}); }});
   };
   const onChange = () => start().catch(e => console.error('[dsh-center]', e.message));
   ctx.effect(() => ctx.webServer.register({kind:'exact',path:'/center-host/setup',handler:async(req,res)=>{

@@ -10,7 +10,7 @@ const here=dirname(fileURLToPath(import.meta.url));
 const hash=x=>createHash('sha256').update(x).digest('hex');
 const random=()=>randomBytes(32).toString('base64url');
 const safeEqual=(a,b)=>{const x=Buffer.from(a),y=Buffer.from(b);return x.length===y.length&&timingSafeEqual(x,y);};
-export async function createCenter({password,publicUrl,dataDir,secure=true,allowWeakPassword=false}) {
+export async function createCenter({password,publicUrl,dataDir,secure=true,allowWeakPassword=false,heartbeatMs=25000}) {
   const minimum=allowWeakPassword?6:16;
   if (!password || password.length<minimum) throw Error(`Set a password of at least ${minimum} characters`);
   const origin=new URL(publicUrl).origin;
@@ -24,7 +24,8 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
   const authSalt=savedAuth?.salt||randomBytes(16).toString('hex');
   const authVerifier=scryptSync(password,authSalt,32).toString('hex');
   const sessions=new Map(savedAuth?.verifier===authVerifier ? (savedAuth.sessions||[]).filter(([key,expires])=>typeof key==='string'&&Number.isFinite(expires)&&expires>Date.now()) : []);
-  const codes=new Map(),hosts=new Map(),pending=new Map(),attempts=new Map();
+  const codes=new Map(),hosts=new Map(),pending=new Map(),attempts=new Map(),links=new Map();
+  const linkState=id=>({online:hosts.get(id)?.readyState===WebSocket.OPEN,connection:hosts.get(id)?.readyState===WebSocket.OPEN?"connected":"reconnecting",...(links.get(id)||{})});
   let authSaves=Promise.resolve();
   const saveSessions=()=>{const data=JSON.stringify({salt:authSalt,verifier:authVerifier,sessions:[...sessions]});authSaves=authSaves.catch(()=>{}).then(async()=>{await writeFile(authStore+'.tmp',data,{mode:0o600});await rename(authStore+'.tmp',authStore);});return authSaves;};
   await saveSessions();
@@ -50,7 +51,7 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
       if(path==='/center/host-devices'&&req.method==='GET'){
         const token=req.headers.authorization?.replace(/^Bearer /,'');
         if(!token||!Object.values(devices).some(d=>safeEqual(d.tokenHash,hash(token)))){json(res,401,{error:'Device authentication required'});return;}
-        json(res,200,{devices:Object.values(devices).map(({id,name,remark})=>({id,name:remark||name,originalName:name,remark:remark||'',online:hosts.has(id)}))});return;
+        json(res,200,{devices:Object.values(devices).map(({id,name,remark})=>({id,name:remark||name,originalName:name,remark:remark||'',...linkState(id)}))});return;
       }
       if(path==='/center/login'&&req.method==='POST'){
         if(!sameOrigin(req)){json(res,403,{error:'Origin rejected'});return;}
@@ -72,7 +73,7 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
       }
       if(!session(req)){json(res,401,{error:'请登录设备中心'});return;}
       if(!['GET','HEAD'].includes(req.method)&&!sameOrigin(req)){json(res,403,{error:'Origin rejected'});return;}
-      if(path==='/center/devices'&&req.method==='GET'){json(res,200,{devices:Object.values(devices).map(({tokenHash,...d})=>({...d,name:d.remark||d.name,originalName:d.name,remark:d.remark||'',online:hosts.has(d.id)}))});return;}
+      if(path==='/center/devices'&&req.method==='GET'){json(res,200,{devices:Object.values(devices).map(({tokenHash,...d})=>({...d,name:d.remark||d.name,originalName:d.name,remark:d.remark||'',...linkState(d.id)}))});return;}
       if(path==='/center/logout'&&req.method==='POST'){
         const value=req.headers.cookie?.split(';').map(x=>x.trim()).find(x=>x.startsWith('center_session='))?.slice(15);if(value)sessions.delete(hash(value));await saveSessions();
         for(const[id,p]of pending)if(p.session===sessionKey(req)){send(hosts.get(p.device),{t:'cancel',id});finish(id,true);}
@@ -91,7 +92,7 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
       }
       const route=authorizePath(req);
       if(!route||!devices[route.device]){json(res,404,{error:'Not found'});return;}
-      const host=hosts.get(route.device);if(!host){json(res,503,{error:'设备离线；不会自动切换到其他电脑'});return;}
+      const host=hosts.get(route.device);if(!host){json(res,503,{error:'设备尚未连接中心，正在等待重连；电脑可能仍在运行'});return;}
       if(pending.size>=512){json(res,503,{error:'连接过多，请稍后重试'});return;}
       const id=random();const p={device:route.device,session:sessionKey(req),res,path:route.path,acceptEncoding:req.headers['accept-encoding']||'',timeout:setTimeout(()=>{send(host,{t:'cancel',id});finish(id,true);},45000)};pending.set(id,p);
       send(host,{t:'request',id,path:route.path,method:req.method,headers:req.headers});
@@ -110,10 +111,13 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
     if(path==='/center/host'){
       const token=req.headers.authorization?.replace(/^Bearer /,'');const d=token&&Object.values(devices).find(d=>safeEqual(d.tokenHash,hash(token)));if(!d){reject();return;}
       wss.handleUpgrade(req,socket,head,ws=>{
-        hosts.get(d.id)?.close(1012,'Reconnected');hosts.set(d.id,ws);ws.alive=true;
-        ws.on('pong',()=>ws.alive=true);
+        const old=hosts.get(d.id);
+        if(old){for(const[id,p]of pending)if(p.device===d.id){send(old,{t:'cancel',id});finish(id,true);}old.close(1012,'Replaced');}
+        hosts.set(d.id,ws);ws.alive=true;links.set(d.id,{connectedAt:Date.now(),lastSeen:Date.now()});
+        console.info('Host connected',d.id,old?'replaced':'new');
+        ws.on('pong',()=>{ws.alive=true;if(hosts.get(d.id)===ws)links.set(d.id,{...links.get(d.id),lastSeen:Date.now()});});
         ws.on('error',e=>console.warn('Host tunnel error',d.id,e.code||'unknown'));
-        ws.on('close',()=>{if(hosts.get(d.id)===ws){hosts.delete(d.id);for(const[id,p]of pending)if(p.device===d.id)finish(id,true);}});
+        ws.on('close',code=>{console.info('Host disconnected',d.id,code);if(hosts.get(d.id)===ws){hosts.delete(d.id);links.set(d.id,{...links.get(d.id),disconnectedAt:Date.now(),closeCode:code});for(const[id,p]of pending)if(p.device===d.id)finish(id,true);}});
         ws.on('message',raw=>{try{
           const m=JSON.parse(raw),p=pending.get(m.id);if(!p||p.device!==d.id||hosts.get(d.id)!==ws)return;
           if(m.t==='headers'&&p.res){
@@ -132,12 +136,13 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
           else if(m.t==='error')finish(m.id,true);
           else if(m.t==='ws-data'&&p.ws?.readyState===WebSocket.OPEN){if(p.ws.bufferedAmount>16*1024*1024)finish(m.id,true);else p.ws.send(Buffer.from(m.data,'base64'),{binary:m.binary});}
           else if(m.t==='ws-open'){clearTimeout(p.timeout);p.ready=true;for(const b of p.queue||[])send(ws,b);p.queue=[];}
-          else if(m.t==='ws-close'){p.ws?.close();finish(m.id);}
+          else if(m.t==='ws-close'){p.ws?.close(1012,'Upstream reconnecting');finish(m.id);}
         }catch{ws.close(1008,'Invalid tunnel message');}});
       });return;
     }
     const route=authorizePath(req);if(!session(req)||!sameOrigin(req)||!route||!hosts.has(route.device)||pending.size>=512){reject();return;}
     browserWss.handleUpgrade(req,socket,head,ws=>{
+      ws.alive=true;ws.on('pong',()=>ws.alive=true);
       const id=random(),host=hosts.get(route.device);const p={device:route.device,session:sessionKey(req),ws,queue:[],ready:false,timeout:setTimeout(()=>finish(id,true),30000)};pending.set(id,p);
       send(host,{t:'ws-open',id,path:route.path,protocols:ws.protocol?[ws.protocol]:[]});
       ws.on('message',(b,binary)=>{const m={t:'ws-data',id,data:b.toString('base64'),binary};if(p.ready)send(host,m);else if(p.queue.length<64)p.queue.push(m);else ws.close(1009);});
@@ -145,10 +150,10 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
     });
   });
   const heartbeat=setInterval(()=>{
-    for(const ws of hosts.values()){if(!ws.alive)ws.terminate();else{ws.alive=false;ws.ping();}}
+    for(const ws of [...hosts.values(),...browserWss.clients]){if(!ws.alive)ws.terminate();else{ws.alive=false;ws.ping();}}
     const now=Date.now();for(const[k,t]of sessions)if(t<now)sessions.delete(k);for(const[k,c]of codes)if(c.expires<now)codes.delete(k);for(const[k,a]of attempts)if(a.until<now)attempts.delete(k);
     for(const[id,p]of pending)if(!sessions.has(p.session)){send(hosts.get(p.device),{t:'cancel',id});finish(id,true);}
-  },25000);heartbeat.unref();
+  },heartbeatMs);heartbeat.unref();
   return {server,close:async()=>{clearInterval(heartbeat);for(const ws of [...wss.clients,...browserWss.clients])ws.terminate();for(const id of pending.keys())finish(id,true);await new Promise(r=>server.close(r));await saves;await authSaves;}};
 }
 if(process.argv[1]===fileURLToPath(import.meta.url)){
