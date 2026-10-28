@@ -88,6 +88,11 @@ npm audit --omit=dev
 
 MIT License · Leo / tula-liuxin
 
+## 0.2.3 缓存改为边发边存
+
+- 冷加载和 0.2.1 一样快（首个字节不被缓冲拖慢），资源仍一边发一边留一份在中心；gzip 在响应结束时截获，第二次请求直接拿压缩副本。
+- 命中缓存的资源从 ~140 ms 降到 ~8 ms（本机到中心的一次连接内测量，已含 TLS 复用）。
+
 ## 0.2.2 加载与切换提速
 
 - 中心的静态资源缓存：`/assets`、`/plugins`、`/dsh-client-modules` 的 200 响应在中心进程内按「设备 + 路径」缓存（LRU，默认 192 MiB，`CENTER_ASSET_CACHE_MB` 可调），命中时不再经过隧道，电脑离线也能打开；gzip 只算一次。
