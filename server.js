@@ -14,6 +14,7 @@ const random=()=>randomBytes(32).toString('base64url');
 const safeEqual=(a,b)=>{const x=Buffer.from(a),y=Buffer.from(b);return x.length===y.length&&timingSafeEqual(x,y);};
 const DEVICE_LABEL=/^[a-f0-9]{24}$/;
 const TIMING=process.env.CENTER_TIMING==='1';
+const MUX_STATS=process.env.CENTER_MUX_STATS==='1';
 export async function createCenter({password,publicUrl,dataDir,secure=true,allowWeakPassword=false,heartbeatMs=25000,deviceDomain,deviceOrigins=true}={}) {
   const minimum=allowWeakPassword?6:16;
   if (!password || password.length<minimum) throw Error(`Set a password of at least ${minimum} characters`);
@@ -101,6 +102,9 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
   // Ask Caddy for the on-demand certificate as soon as a device is known, so the
   // first browser visit does not pay for ACME issuance.
   const warmed=new Set();
+  // Optional observability: how much the browser <-> host multiplexed socket moves.
+  const muxStats=new Map();
+  const muxStat=id=>{let s=muxStats.get(id);if(!s){s={inFrames:0,inBytes:0,outFrames:0,outBytes:0};muxStats.set(id,s);}return s;};
   const warmCertificate=id=>{
     const portal=portalFor(id);if(!portal||warmed.has(id))return;
     warmed.add(id);
@@ -287,7 +291,7 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
             } else {p.res.end();captureAsset(p);finish(m.id);}
           }
           else if(m.t==='error')finish(m.id,true);
-          else if(m.t==='ws-data'&&p.ws?.readyState===WebSocket.OPEN){if(p.ws.bufferedAmount>16*1024*1024)finish(m.id,true);else p.ws.send(Buffer.from(m.data,'base64'),{binary:m.binary});}
+          else if(m.t==='ws-data'&&p.ws?.readyState===WebSocket.OPEN){if(p.ws.bufferedAmount>16*1024*1024)finish(m.id,true);else{p.ws.send(Buffer.from(m.data,'base64'),{binary:m.binary});if(p.stats){p.stats.outFrames++;p.stats.outBytes+=m.data.length*0.75;}}}
           else if(m.t==='ws-open'){clearTimeout(p.timeout);p.ready=true;for(const b of p.queue||[])send(ws,b);p.queue=[];}
           else if(m.t==='ws-close'){p.ws?.close(1012,'Upstream reconnecting');finish(m.id);}
         }catch{ws.close(1008,'Invalid tunnel message');}});
@@ -298,14 +302,16 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
     if(!route||!session(req)||!sameOrigin(req)||!hosts.has(route.device)||pending.size>=512){reject();return;}
     browserWss.handleUpgrade(req,socket,head,ws=>{
       ws.alive=true;ws.on('pong',()=>ws.alive=true);
-      const id=random(),host=hosts.get(route.device);const p={device:route.device,session:sessionKey(req),ws,queue:[],ready:false,timeout:setTimeout(()=>finish(id,true),30000)};pending.set(id,p);
+      const stats=MUX_STATS?muxStat(route.device):null;if(stats)console.info('[mux] open',route.device);
+      const id=random(),host=hosts.get(route.device);const p={device:route.device,session:sessionKey(req),ws,queue:[],ready:false,stats,timeout:setTimeout(()=>finish(id,true),30000)};pending.set(id,p);
       send(host,{t:'ws-open',id,path:route.path,protocols:ws.protocol?[ws.protocol]:[]});
-      ws.on('message',(b,binary)=>{const m={t:'ws-data',id,data:b.toString('base64'),binary};if(p.ready)send(host,m);else if(p.queue.length<64)p.queue.push(m);else ws.close(1009);});
-      ws.on('close',()=>{send(host,{t:'cancel',id});finish(id);});ws.on('error',()=>{});
+      ws.on('message',(b,binary)=>{if(stats){stats.inFrames++;stats.inBytes+=b.length;}const m={t:'ws-data',id,data:b.toString('base64'),binary};if(p.ready)send(host,m);else if(p.queue.length<64)p.queue.push(m);else ws.close(1009);});
+      ws.on('close',()=>{if(stats)console.info('[mux] close',route.device);send(host,{t:'cancel',id});finish(id);});ws.on('error',()=>{});
     });
   });
   const heartbeat=setInterval(()=>{
     for(const ws of [...hosts.values(),...browserWss.clients]){if(!ws.alive)ws.terminate();else{ws.alive=false;ws.ping();}}
+    if(MUX_STATS)for(const[id,s]of muxStats){if(s.inFrames||s.outFrames){console.info('[mux]',id,'in',s.inFrames,'frames',Math.round(s.inBytes),'B out',s.outFrames,'frames',Math.round(s.outBytes),'B');s.inFrames=s.inBytes=s.outFrames=s.outBytes=0;}}
     const now=Date.now();for(const[k,t]of sessions)if(t<now)sessions.delete(k);for(const[k,c]of codes)if(c.expires<now)codes.delete(k);for(const[k,a]of attempts)if(a.until<now)attempts.delete(k);
     for(const[id,p]of pending)if(!sessions.has(p.session)){send(hosts.get(p.device),{t:'cancel',id});finish(id,true);}
   },heartbeatMs);heartbeat.unref();
