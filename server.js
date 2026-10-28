@@ -243,7 +243,9 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
   });
   // A 16 MiB DSH response expands beyond 21 MiB in the base64 tunnel envelope.
   const wss=new WebSocketServer({noServer:true,maxPayload:24*1024*1024,perMessageDeflate:{threshold:1024,serverNoContextTakeover:true,clientNoContextTakeover:true,concurrencyLimit:2,zlibDeflateOptions:{level:3}}});
-  const browserWss=new WebSocketServer({noServer:true,maxPayload:1024*1024});
+  // Session switches push megabytes of JSON down this socket; compress it. Browsers
+  // always offer permessage-deflate, and frames are text so the ratio is high.
+  const browserWss=new WebSocketServer({noServer:true,maxPayload:1024*1024,perMessageDeflate:{threshold:1024,concurrencyLimit:2,zlibDeflateOptions:{level:3}}});
   server.on('upgrade',(req,socket,head)=>{
     const url=new URL(req.url,origin);
     const path=url.pathname;
@@ -303,6 +305,7 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
     browserWss.handleUpgrade(req,socket,head,ws=>{
       ws.alive=true;ws.on('pong',()=>ws.alive=true);
       const stats=MUX_STATS?muxStat(route.device):null;if(stats)console.info('[mux] open',route.device);
+      ws._device=route.device;
       const id=random(),host=hosts.get(route.device);const p={device:route.device,session:sessionKey(req),ws,queue:[],ready:false,stats,timeout:setTimeout(()=>finish(id,true),30000)};pending.set(id,p);
       send(host,{t:'ws-open',id,path:route.path,protocols:ws.protocol?[ws.protocol]:[]});
       ws.on('message',(b,binary)=>{if(stats){stats.inFrames++;stats.inBytes+=b.length;}const m={t:'ws-data',id,data:b.toString('base64'),binary};if(p.ready)send(host,m);else if(p.queue.length<64)p.queue.push(m);else ws.close(1009);});
@@ -312,6 +315,7 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
   const heartbeat=setInterval(()=>{
     for(const ws of [...hosts.values(),...browserWss.clients]){if(!ws.alive)ws.terminate();else{ws.alive=false;ws.ping();}}
     if(MUX_STATS)for(const[id,s]of muxStats){if(s.inFrames||s.outFrames){console.info('[mux]',id,'in',s.inFrames,'frames',Math.round(s.inBytes),'B out',s.outFrames,'frames',Math.round(s.outBytes),'B');s.inFrames=s.inBytes=s.outFrames=s.outBytes=0;}}
+    if(MUX_STATS)for(const client of browserWss.clients){const socket=client._socket;if(!socket)continue;const written=socket.bytesWritten,read=socket.bytesRead;if(!client._wire){client._wire={written,read};continue;}const dw=written-client._wire.written,dr=read-client._wire.read;if(dw||dr){const ext=client.extensions||'none';console.info('[mux-wire]',client._device||'?',ext,'in',dr,'B out',dw,'B');client._wire={written,read};}}
     const now=Date.now();for(const[k,t]of sessions)if(t<now)sessions.delete(k);for(const[k,c]of codes)if(c.expires<now)codes.delete(k);for(const[k,a]of attempts)if(a.until<now)attempts.delete(k);
     for(const[id,p]of pending)if(!sessions.has(p.session)){send(hosts.get(p.device),{t:'cancel',id});finish(id,true);}
   },heartbeatMs);heartbeat.unref();

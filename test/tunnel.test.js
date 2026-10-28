@@ -5,6 +5,7 @@ import {mkdtemp,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {WebSocketServer,WebSocket} from 'ws';
+import {randomBytes} from 'node:crypto';
 import {createCenter} from '../server.js';
 import {connectHost} from '../plugin/tunnel.js';
 const listen=s=>new Promise(r=>s.listen(0,'127.0.0.1',()=>r(`http://127.0.0.1:${s.address().port}`)));
@@ -64,7 +65,7 @@ test('authentication, pairing, isolated devices, streaming, websocket, revocatio
    await new Promise((resolve,reject)=>{const timer=setTimeout(()=>{large.terminate();reject(Error('large session timed out'));},3000);large.once('open',()=>large.send('large-session'));large.once('message',data=>{clearTimeout(timer);assert.equal(data.toString(),'会话内容'.repeat(300000));large.close();resolve();});large.once('close',code=>{clearTimeout(timer);reject(Error('session transfer closed: '+code));});large.once('error',reject);});
    assert.equal((await(await api('/center/devices')).json()).devices.find(x=>x.id===a.id).online,true);
    const oversized=new WebSocket(url.replace('http:','ws:')+'/d/'+a.id+'/echo',{headers:{origin:'http://localhost',cookie}});
-   await new Promise((resolve,reject)=>{const timer=setTimeout(()=>{oversized.terminate();reject(Error('oversized request not rejected'));},2000);oversized.once('open',()=>oversized.send(Buffer.alloc(1100000)));oversized.once('close',code=>{clearTimeout(timer);assert.equal(code,1009);resolve();});oversized.once('error',reject);});
+   await new Promise((resolve,reject)=>{const timer=setTimeout(()=>{oversized.terminate();reject(Error('oversized request not rejected'));},2000);oversized.once('open',()=>oversized.send(randomBytes(1100000)));oversized.once('close',code=>{clearTimeout(timer);assert.equal(code,1009);resolve();});oversized.once('error',reject);});
    assert.equal((await(await api('/center/devices')).json()).devices.find(x=>x.id===a.id).online,true);
    const active=new WebSocket(url.replace('http:','ws:')+'/d/'+b.id+'/echo',{headers:{origin:'http://localhost',cookie}});
    await new Promise((resolve,reject)=>{active.once('open',resolve);active.once('error',reject);});

@@ -88,6 +88,12 @@ npm audit --omit=dev
 
 MIT License · Leo / tula-liuxin
 
+## 0.2.4 浏览器侧 WebSocket 压缩
+
+- 切换 session 时浏览器↔中心那条常连 WebSocket 会推几 MB 的 JSON（实测 25 秒窗口 5–7 MB），而它此前不压缩。
+- 现在给浏览器侧 WebSocket 开 `permessage-deflate`（无损），并保留 1 MiB 单帧上限；压缩只影响浏览器↔中心这一段，中心↔电脑本来就压过。
+- 观测：`CENTER_MUX_STATS=1` 时打印 `[mux]` 逻辑字节和 `[mux-wire]` 实际线上字节（含 `permessage-deflate` 标记），可对比压缩率。
+
 ## 0.2.3 缓存改为边发边存
 
 - 冷加载和 0.2.1 一样快（首个字节不被缓冲拖慢），资源仍一边发一边留一份在中心；gzip 在响应结束时截获，第二次请求直接拿压缩副本。
