@@ -10,6 +10,8 @@
 
 浏览器 → HTTPS 中心 → WebSocket 隧道 → 本机回环 DSH 服务。
 
+每台设备有自己的 origin（`<设备ID>.中心域名`），DSH 就挂在 `/` 上，所以插件里写死的根路径（`/leo-status/api/...`、`/assets/...`、`new WebSocket('/...')`）原样可用，不需要为隧道做任何适配。中心的 `<域名>/d/<设备ID>/` 旧前缀仍然保留，老链接和旧版插件继续可用。
+
 - 会话、文件、模型密钥和执行保留在 Host。
 - 中心保存设备名称和设备凭据的哈希；登录会话和配对码在内存中，中心重启后浏览器重新登录。
 - 每条请求绑定设备 ID，切换设备不改变已有请求的执行位置。
@@ -40,20 +42,33 @@ npm ci --omit=dev --ignore-scripts
 export CENTER_PUBLIC_URL=https://dsh.example.com
 export CENTER_PASSWORD_FILE=/secure/path/password
 export CENTER_DATA=/var/lib/dsh-center
+# 可选：设备 origin 的父域，默认取 CENTER_PUBLIC_URL 的主机名
+export CENTER_DEVICE_DOMAIN=dsh.example.com
 node server.js
 ```
 
 密码至少 16 个字符，推荐随机生成。默认只监听 `127.0.0.1:4320`。HTTPS 代理需要转发 WebSocket Upgrade，不缓存响应。不要将未经 HTTPS 保护的 HTTP 端口发布到公网。
 
-示例 Caddy 站点：
+设备 origin 需要一条泛解析 DNS：`*.dsh.example.com` 与 `dsh.example.com` 指向同一台机器。示例 Caddy 站点用按需签发的证书，不必手工为每台设备申请：
 
 ```caddy
-dsh.example.com {
+{
+    email you@example.com
+    on_demand_tls {
+        ask http://127.0.0.1:4320/center/tls-ask
+    }
+}
+
+dsh.example.com, *.dsh.example.com {
     reverse_proxy 127.0.0.1:4320 {
         flush_interval -1
     }
 }
 ```
+
+`/center/tls-ask` 只对真实设备 origin 返回 200，其他域名不会拿到证书。登录 cookie 会带 `Domain=<父域>`，因此中心页面和设备 origin 共用一次登录。
+
+`CENTER_DEVICE_ORIGINS=0` 可关闭设备 origin 的对外宣告（接口不再返回 `portal`，页面回落到 `/d/<设备ID>/` 前缀），便于在 DNS 或证书就绪前先升级中心。
 
 仓库 `compose.yml` 是当前部署实例：连接已有 `co-align-v2_default` 边缘代理网络，容器名别名为 `dsh-center`。独立部署时更换网络名称或使用回环端口反代。目录 `data` 必须允许容器 UID 1000 写入，密码文件只允许可信用户读取。
 
@@ -72,6 +87,14 @@ npm audit --omit=dev
 单中心账号，最多 512 个同时转发请求/流；上传上限 32 MiB。慢连接队列有上限，超限断开以防止拖垮设备。首次响应超时 45 秒。大附件和高速批量传输不是第一版优化目标。
 
 MIT License · Leo / tula-liuxin
+
+## 0.2.0 每台设备一个 origin
+
+- 中心按 Host 把 `<设备ID>.<父域>` 路由到对应设备的隧道，DSH 直接挂在根路径。
+- 插件里写死的根路径、cookie、WebSocket 地址不再需要为隧道适配；新插件的作者无需了解设备中心。
+- 登录 cookie 带 `Domain=<父域>`，中心页面与设备 origin 共用一次登录。
+- `/d/<设备ID>/` 旧前缀保留；`CENTER_DEVICE_ORIGINS=0` 可在 DNS/证书就绪前关闭新入口的宣告。
+- 新增 `/center/tls-ask`，供 Caddy 按需签发证书时校验域名。
 
 ## 0.1.7 连接恢复
 

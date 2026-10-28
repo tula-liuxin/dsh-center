@@ -84,7 +84,7 @@ export function connectHost(config, getLocal, {retryMs = 3000, heartbeatTimeoutM
             }
           });
           res.on('end', () => {
-            if(index){const html=Buffer.concat(parts).toString('utf8').replace(/<head(?:\s[^>]*)?>/i,open=>open+'<script>globalThis.__DSH_TRANSPORT__={ownsHost:true};</script>');send({t:'chunk',id:m.id,data:Buffer.from(html).toString('base64')});}
+            if(index){const marker='<script>globalThis.__DSH_TRANSPORT__={ownsHost:true};globalThis.__DSH_CENTER_PORTAL__=true;</script><style>#dsh-center-dock{display:none!important}</style>';const html=Buffer.concat(parts).toString('utf8').replace(/<head(?:\s[^>]*)?>/i,open=>open+marker);send({t:'chunk',id:m.id,data:Buffer.from(html).toString('base64')});}
             active.delete(m.id);send({t:'end',id:m.id});
           });
           res.on('error', () => send({t:'error',id:m.id}));

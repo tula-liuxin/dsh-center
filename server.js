@@ -10,10 +10,20 @@ const here=dirname(fileURLToPath(import.meta.url));
 const hash=x=>createHash('sha256').update(x).digest('hex');
 const random=()=>randomBytes(32).toString('base64url');
 const safeEqual=(a,b)=>{const x=Buffer.from(a),y=Buffer.from(b);return x.length===y.length&&timingSafeEqual(x,y);};
-export async function createCenter({password,publicUrl,dataDir,secure=true,allowWeakPassword=false,heartbeatMs=25000}) {
+const DEVICE_LABEL=/^[a-f0-9]{24}$/;
+export async function createCenter({password,publicUrl,dataDir,secure=true,allowWeakPassword=false,heartbeatMs=25000,deviceDomain,deviceOrigins=true}={}) {
   const minimum=allowWeakPassword?6:16;
   if (!password || password.length<minimum) throw Error(`Set a password of at least ${minimum} characters`);
-  const origin=new URL(publicUrl).origin;
+  const publicBase=new URL(publicUrl);
+  const origin=publicBase.origin;
+  // Every device gets its own origin (<id>.<base domain>) so browser code that
+  // builds root-absolute URLs keeps working without any per-plugin adaptation.
+  const baseDomain=String(deviceDomain||publicBase.hostname).replace(/^\.+/,'').replace(/\.+$/,'').toLowerCase();
+  const portSuffix=publicBase.port?':'+publicBase.port:'';
+  const portalFor=id=>deviceOrigins?`${publicBase.protocol}//${id}.${baseDomain}${portSuffix}/`:undefined;
+  // The login cookie must reach the device origins as well.
+  const cookieDomain=secure&&baseDomain.includes('.')&&!/^[\d.]+$/.test(baseDomain)?`; Domain=${baseDomain}`:'';
+  const hostnameOf=value=>String(value||'').toLowerCase().replace(/:\d+$/,'');
   const salt=randomBytes(16), passwordHash=scryptSync(password,salt,32);
   const store=join(dataDir,'devices.json'); await mkdir(dataDir,{recursive:true});
   let devices={};try{devices=JSON.parse(await readFile(store,'utf8'));}catch(e){if(e.code!=='ENOENT')throw e;}
@@ -36,22 +46,70 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
     return value?hash(value):'';
   };
   const session=req=>sessions.get(sessionKey(req))>Date.now();
-  const sameOrigin=req=>req.headers.origin===origin;
+  // Same origin means: the configured public origin, or the exact host that was
+  // requested (device subdomains). Anything else is a cross-site request.
+  const sameOrigin=req=>{
+    const value=req.headers.origin;
+    if(!value)return true;
+    try{
+      const u=new URL(value);
+      if(u.origin===origin)return true;
+      return u.host===req.headers.host&&(u.protocol==='https:'||u.protocol==='http:');
+    }catch{return false;}
+  };
   const read=async req=>{let text='';for await(const b of req){text+=b;if(Buffer.byteLength(text)>8192)throw Error('Body too large');}return JSON.parse(text||'{}');};
   function send(ws,m){if(ws?.readyState!==WebSocket.OPEN)return false;if(ws.bufferedAmount>16*1024*1024){ws.terminate();return false;}ws.send(JSON.stringify(m));return true;}
   function finish(id,error=false){const p=pending.get(id);if(!p)return;pending.delete(id);clearTimeout(p.timeout);if(error){p.output?.destroy();if(p.res){if(!p.res.headersSent)json(p.res,502,{error:'设备连接中断，请重新连接'});else p.res.destroy();}else p.ws?.close(1011,'Device disconnected');}}
   function authorizePath(req){const u=new URL(req.url,origin);const match=/^\/d\/([a-f0-9]{24})(\/.*)$/.exec(u.pathname);return match&&{device:match[1],path:match[2]+u.search};}
+  // Resolve the device a request belongs to from its Host header.
+  // null: the center itself (apex). 'unknown': a device origin with no such device.
+  const deviceFromHost=host=>{
+    const h=hostnameOf(host);
+    if(h===baseDomain||h===hostnameOf(publicBase.host))return null;
+    const suffix='.'+baseDomain;
+    if(!h.endsWith(suffix))return null;
+    const label=h.slice(0,-suffix.length);
+    return DEVICE_LABEL.test(label)&&devices[label]?label:'unknown';
+  };
+  const deviceList=list=>Object.values(list).map(({id,name,remark,tokenHash,...rest})=>({id,name:remark||name,originalName:name,remark:remark||'',portal:portalFor(id),...linkState(id),...rest}));
   const app=await readFile(join(here,'web/index.html'));
   const js=await readFile(join(here,'web/app.js'));
+  const forward=(device,path,req,res)=>{
+    const host=hosts.get(device);if(!host){json(res,503,{error:'设备尚未连接中心，正在等待重连；电脑可能仍在运行'});return;}
+    if(pending.size>=512){json(res,503,{error:'连接过多，请稍后重试'});return;}
+    const id=random();const p={device,session:sessionKey(req),res,path,acceptEncoding:req.headers['accept-encoding']||'',timeout:setTimeout(()=>{send(host,{t:'cancel',id});finish(id,true);},45000)};pending.set(id,p);
+    send(host,{t:'request',id,path,method:req.method,headers:req.headers});
+    let bytes=0;req.on('data',b=>{bytes+=b.length;if(bytes>32*1024*1024){send(host,{t:'cancel',id});finish(id,true);req.destroy();return;}send(host,{t:'data',id,data:b.toString('base64')});});
+    req.on('end',()=>send(host,{t:'end',id}));
+    req.on('error',()=>{send(host,{t:'cancel',id});finish(id,true);});
+    res.on('close',()=>{if(pending.has(id)){send(host,{t:'cancel',id});finish(id);}});
+  };
   const server=http.createServer(async(req,res)=>{
     res.setHeader('x-content-type-options','nosniff');res.setHeader('referrer-policy','no-referrer');res.setHeader('cache-control','no-store');
     try{
-      const path=new URL(req.url,origin).pathname;
+      const url=new URL(req.url,origin);
+      const path=url.pathname;
+      const deviceHost=deviceFromHost(req.headers.host);
+      if(deviceHost==='unknown'){json(res,404,{error:'Not found'});return;}
       if(path==='/health'){json(res,200,{ok:true});return;}
+      // Caddy's on-demand TLS permission check; only real device origins may get a certificate.
+      if(path==='/center/tls-ask'&&req.method==='GET'){
+        const asked=hostnameOf(url.searchParams.get('domain')||'');
+        const id=asked!==''?deviceFromHost(asked):null;
+        if(id&&id!=='unknown'){res.writeHead(200,{'content-type':'text/plain'});res.end('ok');}
+        else{res.writeHead(403,{'content-type':'text/plain'});res.end('no');}
+        return;
+      }
+      // A device origin is the DSH app itself: every path belongs to that device.
+      if(deviceHost){
+        if(!session(req)){json(res,401,{error:'请登录设备中心'});return;}
+        if(!['GET','HEAD'].includes(req.method)&&!sameOrigin(req)){json(res,403,{error:'Origin rejected'});return;}
+        forward(deviceHost,path+url.search,req,res);return;
+      }
       if(path==='/center/host-devices'&&req.method==='GET'){
         const token=req.headers.authorization?.replace(/^Bearer /,'');
         if(!token||!Object.values(devices).some(d=>safeEqual(d.tokenHash,hash(token)))){json(res,401,{error:'Device authentication required'});return;}
-        json(res,200,{devices:Object.values(devices).map(({id,name,remark})=>({id,name:remark||name,originalName:name,remark:remark||'',...linkState(id)}))});return;
+        json(res,200,{devices:deviceList(devices)});return;
       }
       if(path==='/center/login'&&req.method==='POST'){
         if(!sameOrigin(req)){json(res,403,{error:'Origin rejected'});return;}
@@ -60,24 +118,24 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
         const body=await read(req);const result=scryptSync(String(body.password||''),salt,32);
         if(!timingSafeEqual(result,passwordHash)){json(res,401,{error:'密码不正确'});return;}
         const token=random();sessions.set(hash(token),Date.now()+30*86400000);await saveSessions();
-        res.setHeader('set-cookie',`center_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000${secure?'; Secure':''}`);json(res,200,{ok:true});return;
+        res.setHeader('set-cookie',`center_session=${token}; HttpOnly; SameSite=Strict; Path=/${cookieDomain}; Max-Age=2592000${secure?'; Secure':''}`);json(res,200,{ok:true});return;
       }
       if(path==='/center/pair'&&req.method==='POST'){
         const b=await read(req),key=hash(String(b.code||'')),code=codes.get(key);
         if(!code||code.expires<Date.now()){json(res,401,{error:'配对码无效或过期'});return;}
         codes.delete(key);const id=randomBytes(12).toString('hex'),token=random();
-        devices[id]={id,name:String(b.name||'我的电脑').slice(0,60),tokenHash:hash(token),createdAt:new Date().toISOString()};await save();json(res,200,{id,token,server:origin});return;
+        devices[id]={id,name:String(b.name||'我的电脑').slice(0,60),tokenHash:hash(token),createdAt:new Date().toISOString()};await save();json(res,200,{id,token,server:origin,portal:portalFor(id)});return;
       }
       if(path==='/'||path==='/center/app.js'){
         res.setHeader('content-type',path==='/'?'text/html; charset=utf-8':'text/javascript; charset=utf-8');res.end(path==='/'?app:js);return;
       }
       if(!session(req)){json(res,401,{error:'请登录设备中心'});return;}
       if(!['GET','HEAD'].includes(req.method)&&!sameOrigin(req)){json(res,403,{error:'Origin rejected'});return;}
-      if(path==='/center/devices'&&req.method==='GET'){json(res,200,{devices:Object.values(devices).map(({tokenHash,...d})=>({...d,name:d.remark||d.name,originalName:d.name,remark:d.remark||'',...linkState(d.id)}))});return;}
+      if(path==='/center/devices'&&req.method==='GET'){json(res,200,{devices:deviceList(devices)});return;}
       if(path==='/center/logout'&&req.method==='POST'){
         const value=req.headers.cookie?.split(';').map(x=>x.trim()).find(x=>x.startsWith('center_session='))?.slice(15);if(value)sessions.delete(hash(value));await saveSessions();
         for(const[id,p]of pending)if(p.session===sessionKey(req)){send(hosts.get(p.device),{t:'cancel',id});finish(id,true);}
-        res.setHeader('set-cookie',`center_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure?'; Secure':''}`);json(res,200,{ok:true});return;
+        res.setHeader('set-cookie',`center_session=; Path=/${cookieDomain}; HttpOnly; SameSite=Strict; Max-Age=0${secure?'; Secure':''}`);json(res,200,{ok:true});return;
       }
       if(path==='/center/codes'&&req.method==='POST'){const code=randomBytes(16).toString('hex');codes.set(hash(code),{expires:Date.now()+600000});json(res,200,{code,expiresIn:600});return;}
       const remarkRoute=/^\/center\/devices\/([a-f0-9]{24})\/remark$/.exec(path);
@@ -90,25 +148,22 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
       if(path.startsWith('/center/devices/')&&req.method==='DELETE'){
         const id=path.split('/').pop();hosts.get(id)?.close(1008,'Revoked');hosts.delete(id);delete devices[id];await save();json(res,200,{ok:true});return;
       }
+      // Legacy path prefix: kept so existing links and older plugin builds keep working.
       const route=authorizePath(req);
       if(!route||!devices[route.device]){json(res,404,{error:'Not found'});return;}
-      const host=hosts.get(route.device);if(!host){json(res,503,{error:'设备尚未连接中心，正在等待重连；电脑可能仍在运行'});return;}
-      if(pending.size>=512){json(res,503,{error:'连接过多，请稍后重试'});return;}
-      const id=random();const p={device:route.device,session:sessionKey(req),res,path:route.path,acceptEncoding:req.headers['accept-encoding']||'',timeout:setTimeout(()=>{send(host,{t:'cancel',id});finish(id,true);},45000)};pending.set(id,p);
-      send(host,{t:'request',id,path:route.path,method:req.method,headers:req.headers});
-      let bytes=0;req.on('data',b=>{bytes+=b.length;if(bytes>32*1024*1024){send(host,{t:'cancel',id});finish(id,true);req.destroy();return;}send(host,{t:'data',id,data:b.toString('base64')});});
-      req.on('end',()=>send(host,{t:'end',id}));
-      req.on('error',()=>{send(host,{t:'cancel',id});finish(id,true);});
-      res.on('close',()=>{if(pending.has(id)){send(host,{t:'cancel',id});finish(id);}});
+      forward(route.device,route.path,req,res);
     }catch{if(!res.headersSent)json(res,400,{error:'请求失败'});else res.destroy();}
   });
   // A 16 MiB DSH response expands beyond 21 MiB in the base64 tunnel envelope.
   const wss=new WebSocketServer({noServer:true,maxPayload:24*1024*1024,perMessageDeflate:{threshold:1024,serverNoContextTakeover:true,clientNoContextTakeover:true,concurrencyLimit:2,zlibDeflateOptions:{level:3}}});
   const browserWss=new WebSocketServer({noServer:true,maxPayload:1024*1024});
   server.on('upgrade',(req,socket,head)=>{
-    const path=new URL(req.url,origin).pathname;
+    const url=new URL(req.url,origin);
+    const path=url.pathname;
     const reject=()=>{socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');};
-    if(path==='/center/host'){
+    const deviceHost=deviceFromHost(req.headers.host);
+    if(deviceHost==='unknown'){reject();return;}
+    if(!deviceHost&&path==='/center/host'){
       const token=req.headers.authorization?.replace(/^Bearer /,'');const d=token&&Object.values(devices).find(d=>safeEqual(d.tokenHash,hash(token)));if(!d){reject();return;}
       wss.handleUpgrade(req,socket,head,ws=>{
         const old=hosts.get(d.id);
@@ -140,7 +195,9 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
         }catch{ws.close(1008,'Invalid tunnel message');}});
       });return;
     }
-    const route=authorizePath(req);if(!session(req)||!sameOrigin(req)||!route||!hosts.has(route.device)||pending.size>=512){reject();return;}
+    // A device origin carries the whole app, so its upgrade path is used verbatim.
+    const route=deviceHost?{device:deviceHost,path:req.url}:authorizePath(req);
+    if(!route||!session(req)||!sameOrigin(req)||!hosts.has(route.device)||pending.size>=512){reject();return;}
     browserWss.handleUpgrade(req,socket,head,ws=>{
       ws.alive=true;ws.on('pong',()=>ws.alive=true);
       const id=random(),host=hosts.get(route.device);const p={device:route.device,session:sessionKey(req),ws,queue:[],ready:false,timeout:setTimeout(()=>finish(id,true),30000)};pending.set(id,p);
@@ -158,6 +215,6 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
 }
 if(process.argv[1]===fileURLToPath(import.meta.url)){
   const password=process.env.CENTER_PASSWORD_FILE? (await readFile(process.env.CENTER_PASSWORD_FILE,'utf8')).trim():process.env.CENTER_PASSWORD;
-  const {server}=await createCenter({password,publicUrl:process.env.CENTER_PUBLIC_URL,dataDir:process.env.CENTER_DATA||'./data',allowWeakPassword:process.env.CENTER_ALLOW_WEAK_PASSWORD==='true'});
+  const {server}=await createCenter({password,publicUrl:process.env.CENTER_PUBLIC_URL,dataDir:process.env.CENTER_DATA||'./data',allowWeakPassword:process.env.CENTER_ALLOW_WEAK_PASSWORD==='true',deviceDomain:process.env.CENTER_DEVICE_DOMAIN,deviceOrigins:process.env.CENTER_DEVICE_ORIGINS!=='0'});
   server.listen(Number(process.env.PORT||4320),process.env.LISTEN_HOST||'127.0.0.1',()=>console.log('DSH Center listening'));
 }
