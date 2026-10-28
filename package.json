@@ -1,1 +1,1 @@
-{"name":"dsh-center","version":"0.2.0","private":true,"type":"module","scripts":{"start":"node server.js","test":"node --test test/*.test.js"},"dependencies":{"ws":"8.22.0"}}
+{"name":"dsh-center","version":"0.2.1","private":true,"type":"module","scripts":{"start":"node server.js","test":"node --test test/*.test.js"},"dependencies":{"ws":"8.22.0"}}

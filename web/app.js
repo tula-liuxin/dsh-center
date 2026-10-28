@@ -64,4 +64,18 @@ $('deviceDock').onclick=()=>{$('deviceMenu').hidden=!$('deviceMenu').hidden;if(!
 $('settings').onclick=()=>{$('deviceMenu').hidden=true;$('dialog').showModal();};
 document.addEventListener('pointerdown',e=>{if(!e.target.closest('#deviceDock,#deviceMenu'))collapseMenu();},true);
 document.addEventListener('keydown',e=>{if(e.key==='Escape')$('deviceMenu').hidden=true;});
+// The framed device page is cross-origin, so it reports where its sidebar footer
+// row sits instead of the center measuring the iframe's DOM.
+window.addEventListener('message',e=>{
+  const d=lastDevices.find(x=>x.id===selected);
+  if(!d||!d.portal)return;
+  let origin='';try{origin=new URL(d.portal).origin;}catch{return;}
+  if(e.origin!==origin)return;
+  const m=e.data;if(!m||m.type!=='dsh-center:dock')return;
+  const frame=$('view').getBoundingClientRect();
+  const x=Math.min(Math.max(8,frame.left+m.right-30),window.innerWidth-34);
+  const y=Math.min(Math.max(8,frame.top+m.top+(m.height-26)/2),window.innerHeight-34);
+  $('deviceDock').style.left=x+'px';$('deviceDock').style.top=y+'px';$('deviceDock').style.bottom='auto';
+  $('deviceMenu').style.bottom=Math.max(12,window.innerHeight-y+8)+'px';
+});
 

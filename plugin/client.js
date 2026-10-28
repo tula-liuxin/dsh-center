@@ -1,12 +1,15 @@
 window.__ModuleLoader__.load({id:'dsh-center-host',factory(){
+function findDockRow(doc, win) {
+  const candidates=[...doc.querySelectorAll('button,[role="button"],span')].filter(el=>/^(?:[⋯…]\s*)?(?:更多|More)$/.test(el.textContent.trim())).map(el=>el.closest('button,[role="button"]')||el.parentElement).filter(Boolean);
+  const rows=candidates.map(el=>el.getBoundingClientRect()).filter(r=>r.width>70&&r.width<500&&r.height>15&&r.height<80&&r.left<100&&r.top>win.innerHeight*.6);
+  rows.sort((a,b)=>b.bottom-a.bottom);return rows[0];
+}
 function alignDeviceDock(button, menu, doc, frame=null) {
   let timer=0, stopped=false;
   const win=doc.defaultView;
   const update=()=>{
     timer=0;if(stopped)return;
-    const candidates=[...doc.querySelectorAll('button,[role="button"],span')].filter(el=>/^(?:[⋯…]\s*)?(?:更多|More)$/.test(el.textContent.trim())).map(el=>el.closest('button,[role="button"]')||el.parentElement).filter(Boolean);
-    const rows=candidates.map(el=>el.getBoundingClientRect()).filter(r=>r.width>70&&r.width<500&&r.height>15&&r.height<80&&r.left<100&&r.top>win.innerHeight*.6);
-    rows.sort((a,b)=>b.bottom-a.bottom);const row=rows[0];
+    const row=findDockRow(doc,win);
     if(!row){button.style.removeProperty('top');button.style.removeProperty('left');button.style.removeProperty('bottom');menu.style.removeProperty('bottom');return;}
     const offset=frame?frame.getBoundingClientRect():{left:0,top:0};
     const x=offset.left+row.right-30, y=offset.top+row.top+(row.height-26)/2;
@@ -19,8 +22,26 @@ function alignDeviceDock(button, menu, doc, frame=null) {
   window.addEventListener('resize',schedule);doc.addEventListener('scroll',schedule,true);update();
   return ()=>{stopped=true;clearTimeout(timer);observer.disconnect();resize.disconnect();window.removeEventListener('resize',schedule);doc.removeEventListener('scroll',schedule,true);};
 }
+// Inside a device-center portal the page is framed cross-origin, so the center
+// cannot measure this sidebar itself. Report the footer row geometry instead of
+// drawing a second dock here: whoever embeds this page (the center) can align
+// its own switcher without any same-origin access.
+function reportDockGeometryToCenter(ctx) {
+  if(window.parent===window)return;
+  let timer=0, stopped=false;
+  const send=()=>{
+    timer=0;if(stopped)return;
+    const row=findDockRow(document,window);if(!row)return;
+    try{window.parent.postMessage({type:'dsh-center:dock',right:row.right,top:row.top,height:row.height,viewport:window.innerHeight},'*');}catch{}
+  };
+  const schedule=()=>{if(!timer&&!stopped)timer=setTimeout(send,80);};
+  const observer=new MutationObserver(schedule);observer.observe(document.body,{childList:true,subtree:true});
+  const resize=new ResizeObserver(schedule);resize.observe(document.documentElement);
+  window.addEventListener('resize',schedule);document.addEventListener('scroll',schedule,true);send();
+  ctx.on('dispose',()=>{stopped=true;clearTimeout(timer);observer.disconnect();resize.disconnect();window.removeEventListener('resize',schedule);document.removeEventListener('scroll',schedule,true);});
+}
   return {apply(ctx){
-    if(location.pathname.startsWith('/d/')||globalThis.__DSH_CENTER_PORTAL__)return;
+    if(location.pathname.startsWith('/d/')||globalThis.__DSH_CENTER_PORTAL__){reportDockGeometryToCenter(ctx);return;}
     const root=document.createElement('div');root.id='dsh-center-dock';
     root.innerHTML=`<style>
 #dsh-center-dock{font:13px system-ui;color:#18202e}#dsh-center-dock button,#dsh-center-dock input{font:inherit;border:1px solid #d8dce3;border-radius:8px;padding:8px;background:white;color:inherit}#dsh-center-dock button{cursor:pointer}#dsh-center-dock [hidden]{display:none!important}#dsh-center-dock .dock{position:fixed;left:240px;bottom:10px;width:26px;height:26px;padding:0;z-index:2147483600;background:#f7f8fa;font-size:16px;line-height:1;display:grid;place-items:center;box-sizing:border-box;color:#596579}#dsh-center-dock .menu{position:fixed;left:12px;bottom:52px;width:260px;max-height:65vh;overflow:auto;z-index:2147483601;background:white;border:1px solid #e2e5ea;border-radius:12px;padding:6px;box-shadow:0 8px 28px #0002}#dsh-center-dock .menu button{display:block;width:100%;border:0;text-align:left;padding:10px}#dsh-center-dock .menu button:hover{background:#f1f4fa}#dsh-center-dock dialog{border:1px solid #e2e5ea;border-radius:14px;padding:24px;width:min(440px,85vw);color:#18202e;background:white}#dsh-center-dock dialog::backdrop{background:#0004}#dsh-center-dock form{display:grid;gap:12px}#dsh-center-dock input{display:block;width:100%;box-sizing:border-box;margin-top:4px}#dsh-center-dock .hint{color:#667085;line-height:1.6}@media(max-width:600px){#dsh-center-dock .dock{left:12px;bottom:12px}}
