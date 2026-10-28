@@ -123,15 +123,17 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
     if(gz)headers['content-encoding']='gzip';
     res.writeHead(200,headers);res.end(body);return true;
   };
-  const emitBuffered=async p=>{
-    const meta=p.meta||{status:200,headers:{}},raw=Buffer.concat(p.parts);p.parts=null;p.bytes=raw.length;
-    const accepts=/\bgzip\b/.test(p.acceptEncoding)&&!meta.headers['content-encoding'];
-    let body=raw;if(accepts)body=await gzipAsync(raw);
-    const headers={...meta.headers,vary:'Accept-Encoding','content-length':String(body.length),'cache-control':p.cacheControl};
-    if(accepts)headers['content-encoding']='gzip';
-    p.res.writeHead(meta.status,headers);p.res.end(body);
-    if(p.cacheKey&&raw.length<=MAX_BUFFERED_ASSET)cachePut(p.cacheKey,{raw,gzip:accepts?body:null,headers:{...meta.headers},cacheControl:p.cacheControl});
-    finish(p.id);
+  // Assets still stream to the browser untouched (no extra TTFB); their raw bytes
+  // are captured on the way so the next request never touches the tunnel. gzip is
+  // prepared in the background for the next visitor.
+  const captureAsset=p=>{
+    const parts=p.parts;p.parts=null;if(p.buffering){buffering--;p.buffering=false;}
+    const gzParts=p.gzParts||null;p.gzParts=null;
+    if(!p.cacheKey||!parts||!parts.length)return;
+    const raw=Buffer.concat(parts);if(raw.length>MAX_BUFFERED_ASSET)return;
+    const entry={raw,gzip:gzParts?Buffer.concat(gzParts):null,headers:{...p.meta.headers},cacheControl:p.cacheControl};
+    cachePut(p.cacheKey,entry);
+    if(!entry.gzip)gzipAsync(raw).then(gz=>{entry.gzip=gz;}).catch(()=>{});
   };
   const forward=(device,path,req,res)=>{
     // Cached assets stay available even while the PC is offline.
@@ -261,26 +263,28 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
             clearTimeout(p.timeout);if(!Number.isInteger(m.status)||m.status<100||m.status>599)throw Error();
             const headers={...m.headers};
             const type=String(headers['content-type']||'');
-            // Buffer cacheable assets so the exact bytes can be kept for the next
-            // browser (and gzipped once instead of per request).
+            // Start capturing cacheable assets while they stream to the browser.
             if(p.cacheKey&&m.status===200&&buffering<MAX_BUFFERS&&CACHEABLE_TYPE.test(type)){
-              p.buffering=true;buffering++;p.meta={status:m.status,headers};p.parts=[];p.size=0;p.cacheControl=cacheControlFor(p.path);
-              return;
+              p.buffering=true;buffering++;p.parts=[];p.size=0;p.meta={status:m.status,headers:{...headers}};p.cacheControl=cacheControlFor(p.path);
             }
-            p.cacheKey='';
+            else p.cacheKey='';
             const compressible=m.status===200&&/\bgzip\b/.test(p.acceptEncoding)&&!headers['content-encoding']&&/text\/html|text\/css|javascript|application\/json|image\/svg\+xml/i.test(type);
-            if(compressible){headers.vary='Accept-Encoding';headers['content-encoding']='gzip';delete headers['content-length'];p.output=createGzip();p.output.on('error',()=>finish(m.id,true));p.output.pipe(p.res);}
-            else if(m.status===200&&CACHEABLE_PATH.test(p.path.split('?')[0])&&CACHEABLE_TYPE.test(type))headers['cache-control']=cacheControlFor(p.path);
+            if(compressible){headers.vary='Accept-Encoding';headers['content-encoding']='gzip';delete headers['content-length'];p.gzParts=p.cacheKey?[]:null;p.output=createGzip();p.output.on('data',chunk=>{if(p.gzParts)p.gzParts.push(chunk);});p.output.on('error',()=>finish(m.id,true));p.output.pipe(p.res);}
+            if(m.status===200&&CACHEABLE_PATH.test(p.path.split('?')[0])&&CACHEABLE_TYPE.test(type))headers['cache-control']=cacheControlFor(p.path);
             p.res.writeHead(m.status,headers);
           }
           else if(m.t==='chunk'&&p.res){
-            if(p.parts){const b=Buffer.from(m.data,'base64');p.parts.push(b);p.size+=b.length;p.bytes+=b.length;if(p.size>MAX_BUFFERED_ASSET){p.cacheKey='';}return;}
             const b=Buffer.from(m.data,'base64');p.bytes+=b.length;
+            if(p.parts){p.size+=b.length;if(p.size<=MAX_BUFFERED_ASSET)p.parts.push(b);else{p.cacheKey='';p.parts=null;p.gzParts=null;if(p.buffering){buffering--;p.buffering=false;}}}
             const output=p.output||p.res;if(output.writableLength>16*1024*1024||p.res.writableLength>16*1024*1024){send(ws,{t:'cancel',id:m.id});finish(m.id,true);return;}output.write(b);
           }
           else if(m.t==='end'&&p.res){
-            if(p.parts){emitBuffered(p).catch(()=>finish(m.id,true));return;}
-            (p.output||p.res).end();finish(m.id);
+            if(p.output){
+              // The gzip stream ends after its last chunk is written; capture only
+              // then, otherwise the cached copy would be a truncated prefix.
+              p.output.once('end',()=>{captureAsset(p);finish(m.id);});
+              p.output.end();
+            } else {p.res.end();captureAsset(p);finish(m.id);}
           }
           else if(m.t==='error')finish(m.id,true);
           else if(m.t==='ws-data'&&p.ws?.readyState===WebSocket.OPEN){if(p.ws.bufferedAmount>16*1024*1024)finish(m.id,true);else p.ws.send(Buffer.from(m.data,'base64'),{binary:m.binary});}
