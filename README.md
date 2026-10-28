@@ -93,6 +93,7 @@ MIT License · Leo / tula-liuxin
 - 中心按 Host 把 `<设备ID>.<父域>` 路由到对应设备的隧道，DSH 直接挂在根路径。
 - 插件里写死的根路径、cookie、WebSocket 地址不再需要为隧道适配；新插件的作者无需了解设备中心。
 - 登录 cookie 带 `Domain=<父域>`，中心页面与设备 origin 共用一次登录。
+- 升级前登录的浏览器（旧 cookie 只对中心域名生效）会在打开中心页时自动轮换一次会话、拿到带 Domain 的 cookie，不需要重新输密码；`center_scope` 这个 JS 可读的同款 cookie 用来判断是否需要迁移。
 - `/d/<设备ID>/` 旧前缀保留；`CENTER_DEVICE_ORIGINS=0` 可在 DNS/证书就绪前关闭新入口的宣告。
 - 新增 `/center/tls-ask`，供 Caddy 按需签发证书时校验域名。
 

@@ -118,7 +118,10 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
         const body=await read(req);const result=scryptSync(String(body.password||''),salt,32);
         if(!timingSafeEqual(result,passwordHash)){json(res,401,{error:'密码不正确'});return;}
         const token=random();sessions.set(hash(token),Date.now()+30*86400000);await saveSessions();
-        res.setHeader('set-cookie',`center_session=${token}; HttpOnly; SameSite=Strict; Path=/${cookieDomain}; Max-Age=2592000${secure?'; Secure':''}`);json(res,200,{ok:true});return;
+        // center_scope is the JS-readable twin of the session cookie: the center page
+        // uses it to detect a session that predates device origins (host-only cookie)
+        // and to migrate that browser to a domain-scoped login.
+        res.setHeader('set-cookie',[`center_session=${token}; HttpOnly; SameSite=Strict; Path=/${cookieDomain}; Max-Age=2592000${secure?'; Secure':''}`,`center_scope=1; SameSite=Strict; Path=/${cookieDomain}; Max-Age=2592000${secure?'; Secure':''}`]);json(res,200,{ok:true});return;
       }
       if(path==='/center/pair'&&req.method==='POST'){
         const b=await read(req),key=hash(String(b.code||'')),code=codes.get(key);
@@ -131,11 +134,25 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
       }
       if(!session(req)){json(res,401,{error:'请登录设备中心'});return;}
       if(!['GET','HEAD'].includes(req.method)&&!sameOrigin(req)){json(res,403,{error:'Origin rejected'});return;}
+      if(path==='/center/relogin'&&req.method==='POST'){
+        // Silent migration for browsers whose session cookie predates device origins:
+        // rotate the token and re-issue it with Domain=<base domain>.
+        if(!session(req)){json(res,401,{error:'请登录设备中心'});return;}
+        if(!sameOrigin(req)){json(res,403,{error:'Origin rejected'});return;}
+        const old=sessionKey(req),token=random();
+        sessions.delete(old);sessions.set(hash(token),Date.now()+30*86400000);await saveSessions();
+        res.setHeader('set-cookie',[
+          `center_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${secure?'; Secure':''}`,
+          `center_session=${token}; HttpOnly; SameSite=Strict; Path=/${cookieDomain}; Max-Age=2592000${secure?'; Secure':''}`,
+          `center_scope=1; SameSite=Strict; Path=/${cookieDomain}; Max-Age=2592000${secure?'; Secure':''}`,
+        ]);
+        json(res,200,{ok:true});return;
+      }
       if(path==='/center/devices'&&req.method==='GET'){json(res,200,{devices:deviceList(devices)});return;}
       if(path==='/center/logout'&&req.method==='POST'){
         const value=req.headers.cookie?.split(';').map(x=>x.trim()).find(x=>x.startsWith('center_session='))?.slice(15);if(value)sessions.delete(hash(value));await saveSessions();
         for(const[id,p]of pending)if(p.session===sessionKey(req)){send(hosts.get(p.device),{t:'cancel',id});finish(id,true);}
-        res.setHeader('set-cookie',`center_session=; Path=/${cookieDomain}; HttpOnly; SameSite=Strict; Max-Age=0${secure?'; Secure':''}`);json(res,200,{ok:true});return;
+        res.setHeader('set-cookie',[`center_session=; Path=/${cookieDomain}; HttpOnly; SameSite=Strict; Max-Age=0${secure?'; Secure':''}`,`center_scope=; Path=/${cookieDomain}; SameSite=Strict; Max-Age=0${secure?'; Secure':''}`]);json(res,200,{ok:true});return;
       }
       if(path==='/center/codes'&&req.method==='POST'){const code=randomBytes(16).toString('hex');codes.set(hash(code),{expires:Date.now()+600000});json(res,200,{code,expiresIn:600});return;}
       const remarkRoute=/^\/center\/devices\/([a-f0-9]{24})\/remark$/.exec(path);

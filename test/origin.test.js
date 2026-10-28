@@ -36,7 +36,17 @@ test('each device gets its own origin, so the app lives at the real root path',a
     assert.equal(login.status,200);
     assert.match(login.headers['set-cookie'][0],/Domain=center\.test/);
     assert.match(login.headers['set-cookie'][0],/Secure/);
-    const cookie=login.headers['set-cookie'][0].split(';')[0];
+    const cookies=login.headers['set-cookie'].join('\n');
+    assert.match(cookies,/center_scope=1/);
+    assert.match(cookies,/center_scope=1[^\n]*Domain=center\.test/);
+    let cookie=login.headers['set-cookie'][0].split(';')[0];
+    // A browser whose session predates device origins can migrate without the password.
+    const relogin=await request(url,{host:'center.test',path:'/center/relogin',method:'POST',headers:{origin:'https://center.test',cookie,'content-type':'application/json'},body:'{}'});
+    assert.equal(relogin.status,200);
+    const scoped=relogin.headers['set-cookie'].find(h=>h.startsWith('center_session=')&&h.includes('Domain=center.test'));
+    assert.ok(scoped,'relogin must re-issue the session with a domain');
+    assert.equal((await request(url,{host:'center.test',path:'/center/devices',headers:{cookie}})).status,401,'old host-only token must be revoked');
+    cookie=scoped.split(';')[0];
     const {code}=JSON.parse((await request(url,{host:'center.test',path:'/center/codes',method:'POST',headers:{origin:'https://center.test',cookie,'content-type':'application/json'},body:'{}'})).body);
     const pair=await request(url,{host:'center.test',path:'/center/pair',method:'POST',headers:{origin:'https://center.test','content-type':'application/json'},body:JSON.stringify({code,name:'A'})});
     assert.equal(pair.status,200);
@@ -66,5 +76,10 @@ test('each device gets its own origin, so the app lives at the real root path',a
     assert.equal((await request(url,{host:'center.test',path:'/center/tls-ask?domain=evil.test'})).status,403);
     const ws=new WebSocket(url.replace('http:','ws:')+'/echo',{headers:{host,origin,cookie}});
     await new Promise((resolve,reject)=>{const timer=setTimeout(()=>{ws.terminate();reject(Error('device origin websocket timed out'));},3000);ws.once('open',()=>ws.send('roundtrip'));ws.once('message',b=>{clearTimeout(timer);assert.equal(b.toString(),'roundtrip');ws.close();resolve();});ws.once('error',e=>{clearTimeout(timer);reject(e);});});
+    const out=await request(url,{host:'center.test',path:'/center/logout',method:'POST',headers:{origin:'https://center.test',cookie,'content-type':'application/json'},body:'{}'});
+    assert.equal(out.status,200);
+    const cleared=out.headers['set-cookie'].join('\n');
+    assert.match(cleared,/center_scope=; /);
+    assert.match(cleared,/center_session=; /);
   }finally{stop();echo.close();await new Promise(r=>upstream.close(r));await center.close();await rm(dir,{recursive:true,force:true});}
 });
