@@ -24,7 +24,9 @@ export function connectHost(config, getLocal, {retryMs = 3000, heartbeatTimeoutM
     let local;
     try { local = await getLocal(); } catch(e) { if(!stopped){onStatus('本机 DSH 连接中断，正在重试'); timer = setTimeout(dial, retryMs);} return; }
     if (stopped) return;
-    ws = new WebSocket(endpoint, {headers: {authorization: `Bearer ${config.token}`}, maxPayload: 2 * 1024 * 1024, handshakeTimeout: 15000});
+    // Compress tunnel frames: assets and session JSON are highly compressible and
+    // the home uplink is usually the slowest hop of the chain.
+    ws = new WebSocket(endpoint, {headers: {authorization: `Bearer ${config.token}`}, maxPayload: 2 * 1024 * 1024, handshakeTimeout: 15000, perMessageDeflate: {threshold: 1024, clientNoContextTakeover: true, zlibDeflateOptions: {level: 3}}});
     const socket = ws;
     ws.on('open', () => { onStatus('online'); armHeartbeat(socket); });
     ws.on('ping', () => armHeartbeat(socket));

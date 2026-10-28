@@ -4,13 +4,16 @@ import {readFile,mkdir,writeFile,rename} from 'node:fs/promises';
 import {dirname,join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {WebSocketServer,WebSocket} from 'ws';
-import {createGzip} from 'node:zlib';
+import {createGzip,gzip} from 'node:zlib';
+
+const gzipAsync=buffer=>new Promise((resolve,reject)=>gzip(buffer,(error,out)=>error?reject(error):resolve(out)));
 
 const here=dirname(fileURLToPath(import.meta.url));
 const hash=x=>createHash('sha256').update(x).digest('hex');
 const random=()=>randomBytes(32).toString('base64url');
 const safeEqual=(a,b)=>{const x=Buffer.from(a),y=Buffer.from(b);return x.length===y.length&&timingSafeEqual(x,y);};
 const DEVICE_LABEL=/^[a-f0-9]{24}$/;
+const TIMING=process.env.CENTER_TIMING==='1';
 export async function createCenter({password,publicUrl,dataDir,secure=true,allowWeakPassword=false,heartbeatMs=25000,deviceDomain,deviceOrigins=true}={}) {
   const minimum=allowWeakPassword?6:16;
   if (!password || password.length<minimum) throw Error(`Set a password of at least ${minimum} characters`);
@@ -59,7 +62,7 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
   };
   const read=async req=>{let text='';for await(const b of req){text+=b;if(Buffer.byteLength(text)>8192)throw Error('Body too large');}return JSON.parse(text||'{}');};
   function send(ws,m){if(ws?.readyState!==WebSocket.OPEN)return false;if(ws.bufferedAmount>16*1024*1024){ws.terminate();return false;}ws.send(JSON.stringify(m));return true;}
-  function finish(id,error=false){const p=pending.get(id);if(!p)return;pending.delete(id);clearTimeout(p.timeout);if(error){p.output?.destroy();if(p.res){if(!p.res.headersSent)json(p.res,502,{error:'设备连接中断，请重新连接'});else p.res.destroy();}else p.ws?.close(1011,'Device disconnected');}}
+  function finish(id,error=false){const p=pending.get(id);if(!p)return;pending.delete(id);clearTimeout(p.timeout);if(p.buffering){buffering--;p.buffering=false;}if(TIMING)console.info(`[timing] ${error?'ERR':'OK'} ${p.path} ${p.bytes||0}B ${Date.now()-p.started}ms`);if(error){p.output?.destroy();if(p.res){if(!p.res.headersSent)json(p.res,502,{error:'设备连接中断，请重新连接'});else p.res.destroy();}else p.ws?.close(1011,'Device disconnected');}}
   function authorizePath(req){const u=new URL(req.url,origin);const match=/^\/d\/([a-f0-9]{24})(\/.*)$/.exec(u.pathname);return match&&{device:match[1],path:match[2]+u.search};}
   // Resolve the device a request belongs to from its Host header.
   // null: the center itself (apex). 'unknown': a device origin with no such device.
@@ -74,10 +77,71 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
   const deviceList=list=>Object.values(list).map(({id,name,remark,tokenHash,...rest})=>({id,name:remark||name,originalName:name,remark:remark||'',portal:portalFor(id),...linkState(id),...rest}));
   const app=await readFile(join(here,'web/index.html'));
   const js=await readFile(join(here,'web/app.js'));
+  // ---- static asset cache -------------------------------------------------
+  // DSH serves content-hashed JS/CSS once per version; the same bytes are then
+  // requested by every browser and every reload. Keeping them in this process
+  // skips the tunnel (and the PC's uplink) completely on a hit, and lets the
+  // browser cache them for a year.
+  const assetCache=new Map();let assetCacheBytes=0;
+  const assetCacheLimit=Math.max(0,Number(process.env.CENTER_ASSET_CACHE_MB??192))*1024*1024;
+  const CACHEABLE_PATH=/^\/(?:assets|plugins|dsh-client-modules)\//;
+  const CACHEABLE_TYPE=/^(?:text\/css|text\/javascript|application\/javascript|application\/json|image\/svg\+xml|font\/|application\/font|image\/)/i;
+  const REVVED_PATH=/[?&]rev=[a-f0-9]+(?:&|$)/;
+  const assetKey=(device,path)=>device+' '+path;
+  const cacheGet=key=>{const entry=assetCache.get(key);if(!entry)return null;assetCache.delete(key);assetCache.set(key,entry);return entry;};
+  const cachePut=(key,entry)=>{
+    const size=entry.raw.length+(entry.gzip?entry.gzip.length:0);
+    if(assetCacheLimit<=0||size>assetCacheLimit/4)return;
+    const old=assetCache.get(key);if(old){assetCache.delete(key);assetCacheBytes-=old.raw.length+(old.gzip?old.gzip.length:0);}
+    assetCache.set(key,entry);assetCacheBytes+=size;
+    while(assetCacheBytes>assetCacheLimit&&assetCache.size>1){const [k,v]=assetCache.entries().next().value;assetCache.delete(k);assetCacheBytes-=v.raw.length+(v.gzip?v.gzip.length:0);}
+  };
+  const revved=path=>REVVED_PATH.test(path)||/^\/assets\/[^?]+-[\w-]+\.(?:js|css)(?:\?|$)/.test(path);
+  const cacheControlFor=path=>revved(path)?'private, max-age=31536000, immutable':'private, max-age=300';
+  // Ask Caddy for the on-demand certificate as soon as a device is known, so the
+  // first browser visit does not pay for ACME issuance.
+  const warmed=new Set();
+  const warmCertificate=id=>{
+    const portal=portalFor(id);if(!portal||warmed.has(id))return;
+    warmed.add(id);
+    fetch(new URL('/health',portal).href,{signal:AbortSignal.timeout(25000)}).then(r=>r.arrayBuffer()).catch(()=>{});
+  };
+  let buffering=0;const MAX_BUFFERS=24,MAX_BUFFERED_ASSET=12*1024*1024;
+  const serveCached=(device,path,req,res)=>{
+    if(assetCacheLimit<=0||req.method!=='GET')return false;
+    const pathname=path.split('?')[0];
+    if(!CACHEABLE_PATH.test(pathname))return false;
+    const entry=cacheGet(assetKey(device,path));if(!entry)return false;
+    const inm=req.headers['if-none-match'];
+    if(inm&&entry.headers.etag&&inm.split(',').map(x=>x.trim()).includes(entry.headers.etag)){
+      res.writeHead(304,{'cache-control':entry.cacheControl,vary:'Accept-Encoding'});res.end();return true;
+    }
+    const accepts=/\bgzip\b/.test(req.headers['accept-encoding']||'');
+    const gz=accepts&&entry.gzip?entry.gzip:null;
+    const body=gz||entry.raw;
+    const headers={...entry.headers,'cache-control':entry.cacheControl,vary:'Accept-Encoding','content-length':String(body.length)};
+    if(gz)headers['content-encoding']='gzip';
+    res.writeHead(200,headers);res.end(body);return true;
+  };
+  const emitBuffered=async p=>{
+    const meta=p.meta||{status:200,headers:{}},raw=Buffer.concat(p.parts);p.parts=null;p.bytes=raw.length;
+    const accepts=/\bgzip\b/.test(p.acceptEncoding)&&!meta.headers['content-encoding'];
+    let body=raw;if(accepts)body=await gzipAsync(raw);
+    const headers={...meta.headers,vary:'Accept-Encoding','content-length':String(body.length),'cache-control':p.cacheControl};
+    if(accepts)headers['content-encoding']='gzip';
+    p.res.writeHead(meta.status,headers);p.res.end(body);
+    if(p.cacheKey&&raw.length<=MAX_BUFFERED_ASSET)cachePut(p.cacheKey,{raw,gzip:accepts?body:null,headers:{...meta.headers},cacheControl:p.cacheControl});
+    finish(p.id);
+  };
   const forward=(device,path,req,res)=>{
+    // Cached assets stay available even while the PC is offline.
+    if(serveCached(device,path,req,res))return;
     const host=hosts.get(device);if(!host){json(res,503,{error:'设备尚未连接中心，正在等待重连；电脑可能仍在运行'});return;}
     if(pending.size>=512){json(res,503,{error:'连接过多，请稍后重试'});return;}
-    const id=random();const p={device,session:sessionKey(req),res,path,acceptEncoding:req.headers['accept-encoding']||'',timeout:setTimeout(()=>{send(host,{t:'cancel',id});finish(id,true);},45000)};pending.set(id,p);
+    const id=random();
+    const p={id,device,session:sessionKey(req),res,path,acceptEncoding:req.headers['accept-encoding']||'',cacheKey:'',bytes:0,started:Date.now(),timeout:setTimeout(()=>{send(host,{t:'cancel',id});finish(id,true);},45000)};
+    if(req.method==='GET'&&assetCacheLimit>0&&CACHEABLE_PATH.test(path.split('?')[0]))p.cacheKey=assetKey(device,path);
+    pending.set(id,p);
     send(host,{t:'request',id,path,method:req.method,headers:req.headers});
     let bytes=0;req.on('data',b=>{bytes+=b.length;if(bytes>32*1024*1024){send(host,{t:'cancel',id});finish(id,true);req.destroy();return;}send(host,{t:'data',id,data:b.toString('base64')});});
     req.on('end',()=>send(host,{t:'end',id}));
@@ -127,7 +191,7 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
         const b=await read(req),key=hash(String(b.code||'')),code=codes.get(key);
         if(!code||code.expires<Date.now()){json(res,401,{error:'配对码无效或过期'});return;}
         codes.delete(key);const id=randomBytes(12).toString('hex'),token=random();
-        devices[id]={id,name:String(b.name||'我的电脑').slice(0,60),tokenHash:hash(token),createdAt:new Date().toISOString()};await save();json(res,200,{id,token,server:origin,portal:portalFor(id)});return;
+        devices[id]={id,name:String(b.name||'我的电脑').slice(0,60),tokenHash:hash(token),createdAt:new Date().toISOString()};await save();if(deviceOrigins)warmCertificate(id);json(res,200,{id,token,server:origin,portal:portalFor(id)});return;
       }
       if(path==='/'||path==='/center/app.js'){
         res.setHeader('content-type',path==='/'?'text/html; charset=utf-8':'text/javascript; charset=utf-8');res.end(path==='/'?app:js);return;
@@ -186,6 +250,7 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
         const old=hosts.get(d.id);
         if(old){for(const[id,p]of pending)if(p.device===d.id){send(old,{t:'cancel',id});finish(id,true);}old.close(1012,'Replaced');}
         hosts.set(d.id,ws);ws.alive=true;links.set(d.id,{connectedAt:Date.now(),lastSeen:Date.now()});
+        if(deviceOrigins)warmCertificate(d.id);
         console.info('Host connected',d.id,old?'replaced':'new');
         ws.on('pong',()=>{ws.alive=true;if(hosts.get(d.id)===ws)links.set(d.id,{...links.get(d.id),lastSeen:Date.now()});});
         ws.on('error',e=>console.warn('Host tunnel error',d.id,e.code||'unknown'));
@@ -195,16 +260,28 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
           if(m.t==='headers'&&p.res){
             clearTimeout(p.timeout);if(!Number.isInteger(m.status)||m.status<100||m.status>599)throw Error();
             const headers={...m.headers};
-            const staticAsset=m.status===200 && /^\/(?:assets|plugins)\//.test(p.path) && /javascript|text\/css|image\/svg\+xml/.test(headers['content-type']||'');
-            if(staticAsset){
-              headers.vary='Accept-Encoding';
-              if(/[?&]rev=[a-f0-9]+(?:&|$)/.test(p.path)||/^\/assets\/[^?]+-[\w-]+\.(?:js|css)(?:\?|$)/.test(p.path))headers['cache-control']='private, max-age=3600';
-              if(/\bgzip\b/.test(p.acceptEncoding)&&!headers['content-encoding']){headers['content-encoding']='gzip';delete headers['content-length'];p.output=createGzip();p.output.on('error',()=>finish(m.id,true));p.output.pipe(p.res);}
+            const type=String(headers['content-type']||'');
+            // Buffer cacheable assets so the exact bytes can be kept for the next
+            // browser (and gzipped once instead of per request).
+            if(p.cacheKey&&m.status===200&&buffering<MAX_BUFFERS&&CACHEABLE_TYPE.test(type)){
+              p.buffering=true;buffering++;p.meta={status:m.status,headers};p.parts=[];p.size=0;p.cacheControl=cacheControlFor(p.path);
+              return;
             }
+            p.cacheKey='';
+            const compressible=m.status===200&&/\bgzip\b/.test(p.acceptEncoding)&&!headers['content-encoding']&&/text\/html|text\/css|javascript|application\/json|image\/svg\+xml/i.test(type);
+            if(compressible){headers.vary='Accept-Encoding';headers['content-encoding']='gzip';delete headers['content-length'];p.output=createGzip();p.output.on('error',()=>finish(m.id,true));p.output.pipe(p.res);}
+            else if(m.status===200&&CACHEABLE_PATH.test(p.path.split('?')[0])&&CACHEABLE_TYPE.test(type))headers['cache-control']=cacheControlFor(p.path);
             p.res.writeHead(m.status,headers);
           }
-          else if(m.t==='chunk'&&p.res){const output=p.output||p.res;if(output.writableLength>16*1024*1024||p.res.writableLength>16*1024*1024){send(ws,{t:'cancel',id:m.id});finish(m.id,true);return;}output.write(Buffer.from(m.data,'base64'));}
-          else if(m.t==='end'&&p.res){(p.output||p.res).end();finish(m.id);}
+          else if(m.t==='chunk'&&p.res){
+            if(p.parts){const b=Buffer.from(m.data,'base64');p.parts.push(b);p.size+=b.length;p.bytes+=b.length;if(p.size>MAX_BUFFERED_ASSET){p.cacheKey='';}return;}
+            const b=Buffer.from(m.data,'base64');p.bytes+=b.length;
+            const output=p.output||p.res;if(output.writableLength>16*1024*1024||p.res.writableLength>16*1024*1024){send(ws,{t:'cancel',id:m.id});finish(m.id,true);return;}output.write(b);
+          }
+          else if(m.t==='end'&&p.res){
+            if(p.parts){emitBuffered(p).catch(()=>finish(m.id,true));return;}
+            (p.output||p.res).end();finish(m.id);
+          }
           else if(m.t==='error')finish(m.id,true);
           else if(m.t==='ws-data'&&p.ws?.readyState===WebSocket.OPEN){if(p.ws.bufferedAmount>16*1024*1024)finish(m.id,true);else p.ws.send(Buffer.from(m.data,'base64'),{binary:m.binary});}
           else if(m.t==='ws-open'){clearTimeout(p.timeout);p.ready=true;for(const b of p.queue||[])send(ws,b);p.queue=[];}

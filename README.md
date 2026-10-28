@@ -88,6 +88,15 @@ npm audit --omit=dev
 
 MIT License · Leo / tula-liuxin
 
+## 0.2.2 加载与切换提速
+
+- 中心的静态资源缓存：`/assets`、`/plugins`、`/dsh-client-modules` 的 200 响应在中心进程内按「设备 + 路径」缓存（LRU，默认 192 MiB，`CENTER_ASSET_CACHE_MB` 可调），命中时不再经过隧道，电脑离线也能打开；gzip 只算一次。
+- 带内容哈希的资源改成 `private, max-age=31536000, immutable`，浏览器一年内不再回源；未带 rev 的静态资源保持 5 分钟短缓存。命中缓存时顺带处理 `If-None-Match` 返回 304。
+- 隧道启用 `permessage-deflate`：会话历史、轨迹这类 JSON 走隧道时先压缩，家用上行是整条链路最慢的一跳。
+- 中心页在打开设备前对设备 origin 做 `preconnect`/`dns-prefetch`，省掉一次 DNS+TLS 握手。
+- 设备上线或配对后，中心主动请求一次 `portal/health`，让 Caddy 提前签发按需证书，第一次打开不再等 ACME。
+- 新增可选的按请求耗时日志：`CENTER_TIMING=1` 时每请求打印 `[timing] 状态 路径 字节 毫秒`，用来定位慢请求。
+
 ## 0.2.1 门户里的设备切换按钮重新对齐
 
 - 设备页现在跑在自己的 origin 上，中心页无法再读取 iframe 的 DOM 来测量侧栏「更多」行的位置，⇄ 按钮会掉回左上角。

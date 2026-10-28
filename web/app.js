@@ -22,6 +22,9 @@ const $=id=>document.getElementById(id);
 // Prefer the device's own origin (the center assigns one per device); it keeps
 // every root-absolute URL, cookie and WebSocket of the DSH app working unchanged.
 const frameUrl=d=>d?.portal||('/d/'+d.id+'/');
+// Warm DNS/TCP/TLS to the device origin before the iframe asks for it.
+const preconnected=new Set();
+const preconnect=url=>{if(!url||preconnected.has(url))return;preconnected.add(url);for(const rel of ['preconnect','dns-prefetch']){const link=document.createElement('link');link.rel=rel;link.href=url;if(rel==='preconnect')link.crossOrigin='anonymous';document.head.append(link);}};
 let settingsRequested=new URLSearchParams(location.search).has('settings');
 let selected=new URLSearchParams(location.search).get('device')||localStorage.getItem('dsh-center-device')||'', loaded='',previousOnline=false,loadingSince=0,lastFrameAttempt=0;
 async function api(path,options={}){const r=await fetch('/center/'+path,{cache:'no-store',signal:AbortSignal.timeout(8000),...options,headers:{'content-type':'application/json',...options.headers}});const b=await r.json();if(!r.ok)throw Object.assign(Error(b.error||'请求失败'),{status:r.status});return b;}
@@ -35,7 +38,7 @@ async function refresh(){if(refreshing)return;refreshing=true;try{const{devices}
  if(!scopedSession()&&!migrating){migrating=true;connectionNotice('登录状态升级中，正在重新登录…');try{await api('relogin',{method:'POST',body:'{}'});}catch{}location.reload();return;}
  if(settingsRequested){settingsRequested=false;$('dialog').showModal();}$('devices').replaceChildren(new Option('选择电脑',''),...devices.map(d=>{const o=new Option(`${d.name}${d.online?'':' · 未连接中心'}`,d.id);return o;}));$('devices').value=selected;
  const d=devices.find(d=>d.id===selected);$('status').textContent=d?`${d.name} · ${d.online?(loadingSince?(Date.now()-loadingSince>20000?'在线 · 加载较慢，可重新连接':'在线 · 页面加载中'):'在线'):'未连接中心'}`:'尚未选择';
- if(d?.online){connectionNotice('');$('empty').hidden=true;$('view').hidden=false;if(loaded!==d.id){loadingSince=Date.now();lastFrameAttempt=Date.now();$('status').textContent=d.name+' · 在线 · 页面加载中';$('view').src=frameUrl(d);loaded=d.id;}}
+ if(d?.online){connectionNotice('');$('empty').hidden=true;$('view').hidden=false;try{preconnect(new URL(frameUrl(d)).origin);}catch{}if(loaded!==d.id){loadingSince=Date.now();lastFrameAttempt=Date.now();$('status').textContent=d.name+' · 在线 · 页面加载中';$('view').src=frameUrl(d);loaded=d.id;}}
  else{const keep=!!d&&loaded===d.id;$('view').hidden=!keep;$('empty').hidden=keep;const message=d?'设备与中心的连接已中断，正在等待自动重连。电脑可能仍在运行。':'选择一台已连接的电脑，或点击左下角图标 → 设置，添加电脑';$('empty').textContent=message;connectionNotice(keep?message:'');}
  $('settingsStatus').textContent=$('status').textContent;
  $('deviceDock').title=d?('设备中心 · '+d.name+(d.online?' · 在线':' · 未连接中心')):'设备中心';
