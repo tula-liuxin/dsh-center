@@ -22,7 +22,7 @@ function alignDeviceDock(button, menu, doc, frame=null) {
 const $=id=>document.getElementById(id);
 // Prefer the device's own origin (the center assigns one per device); it keeps
 // every root-absolute URL, cookie and WebSocket of the DSH app working unchanged.
-const frameUrl=d=>d?.portal||('/d/'+d.id+'/');
+const frameUrl=d=>{const u=new URL(d?.portal||('/d/'+d.id+'/'));if(!u.searchParams.has('dsh-center-portal'))u.searchParams.set('dsh-center-portal','1');return u.href;};
 // Warm DNS/TCP/TLS to the device origin before the iframe asks for it.
 const preconnected=new Set();
 const preconnect=url=>{if(!url||preconnected.has(url))return;preconnected.add(url);for(const rel of ['preconnect','dns-prefetch']){const link=document.createElement('link');link.rel=rel;link.href=url;if(rel==='preconnect')link.crossOrigin='anonymous';document.head.append(link);}};
