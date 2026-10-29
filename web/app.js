@@ -3,6 +3,7 @@ function alignDeviceDock(button, menu, doc, frame=null) {
   const win=doc.defaultView;
   const update=()=>{
     timer=0;if(stopped)return;
+    if(window.matchMedia('(max-width:600px)').matches){button.style.left='auto';button.style.top='auto';button.style.right='12px';button.style.bottom='150px';menu.style.left='auto';menu.style.right='12px';menu.style.bottom='190px';return;}
     const candidates=[...doc.querySelectorAll('button,[role="button"],span')].filter(el=>/^(?:[⋯…]\s*)?(?:更多|More)$/.test(el.textContent.trim())).map(el=>el.closest('button,[role="button"]')||el.parentElement).filter(Boolean);
     const rows=candidates.map(el=>el.getBoundingClientRect()).filter(r=>r.width>70&&r.width<500&&r.height>15&&r.height<80&&r.left<100&&r.top>win.innerHeight*.6);
     rows.sort((a,b)=>b.bottom-a.bottom);const row=rows[0];
