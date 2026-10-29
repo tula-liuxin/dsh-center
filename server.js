@@ -78,6 +78,7 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
   const deviceList=list=>Object.values(list).map(({id,name,remark,tokenHash,...rest})=>({id,name:remark||name,originalName:name,remark:remark||'',portal:portalFor(id),...linkState(id),...rest}));
   const app=await readFile(join(here,'web/index.html'));
   const js=await readFile(join(here,'web/app.js'));
+  const favicon=await readFile(join(here,'web/icon.svg'));
   // ---- static asset cache -------------------------------------------------
   // DSH serves content-hashed JS/CSS once per version; the same bytes are then
   // requested by every browser and every reload. Keeping them in this process
@@ -198,6 +199,10 @@ export async function createCenter({password,publicUrl,dataDir,secure=true,allow
         if(!code||code.expires<Date.now()){json(res,401,{error:'配对码无效或过期'});return;}
         codes.delete(key);const id=randomBytes(12).toString('hex'),token=random();
         devices[id]={id,name:String(b.name||'我的电脑').slice(0,60),tokenHash:hash(token),createdAt:new Date().toISOString()};await save();if(deviceOrigins)warmCertificate(id);json(res,200,{id,token,server:origin,portal:portalFor(id)});return;
+      }
+      if(path==='/favicon.ico'||path==='/center/icon.svg'){
+        if(!['GET','HEAD'].includes(req.method)){res.writeHead(405,{allow:'GET, HEAD'}).end();return;}
+        res.writeHead(200,{'content-type':'image/svg+xml','cache-control':'public, max-age=86400','x-content-type-options':'nosniff'});res.end(req.method==='HEAD'?undefined:favicon);return;
       }
       if(path==='/'||path==='/center/app.js'){
         res.setHeader('content-type',path==='/'?'text/html; charset=utf-8':'text/javascript; charset=utf-8');res.end(path==='/'?app:js);return;
