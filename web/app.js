@@ -75,6 +75,7 @@ window.addEventListener('message',e=>{
   let origin='';try{origin=new URL(d.portal).origin;}catch{return;}
   if(e.origin!==origin)return;
   const m=e.data;if(!m||m.type!=='dsh-center:dock')return;
+  if(window.matchMedia('(max-width:600px)').matches){const d=$('deviceDock'),menu=$('deviceMenu');d.style.left='auto';d.style.top='auto';d.style.right='12px';d.style.bottom='150px';menu.style.left='auto';menu.style.right='12px';menu.style.bottom='190px';return;}
   const frame=$('view').getBoundingClientRect();
   const x=Math.min(Math.max(8,frame.left+m.right-30),window.innerWidth-34);
   const y=Math.min(Math.max(8,frame.top+m.top+(m.height-26)/2),window.innerHeight-34);
