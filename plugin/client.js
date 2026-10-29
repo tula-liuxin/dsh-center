@@ -4,15 +4,17 @@ function findDockRow(doc, win) {
   const rows=candidates.map(el=>el.getBoundingClientRect()).filter(r=>r.width>70&&r.width<500&&r.height>15&&r.height<80&&r.left<100&&r.top>win.innerHeight*.6);
   rows.sort((a,b)=>b.bottom-a.bottom);return rows[0];
 }
+function isCompactCenterViewport(win){try{return win.matchMedia?.('(pointer:coarse)').matches===true||win.innerWidth<=700}catch{return false}}
 function alignDeviceDock(button, menu, doc, frame=null) {
   let timer=0, stopped=false;
   const win=doc.defaultView;
   const update=()=>{
     timer=0;if(stopped)return;
     const row=findDockRow(doc,win);
-    if(!row){button.style.removeProperty('top');button.style.removeProperty('left');button.style.removeProperty('bottom');menu.style.removeProperty('bottom');return;}
+    const lift=isCompactCenterViewport(win)?46:0;
+    if(!row){ if(isCompactCenterViewport(win)){button.style.left=(win.innerWidth-42)+'px';button.style.top=(win.innerHeight-118)+'px';button.style.bottom='auto';menu.style.bottom='150px';return;} button.style.removeProperty('top');button.style.removeProperty('left');button.style.removeProperty('bottom');menu.style.removeProperty('bottom');return;}
     const offset=frame?frame.getBoundingClientRect():{left:0,top:0};
-    const x=offset.left+row.right-30, y=offset.top+row.top+(row.height-26)/2;
+    const x=offset.left+row.right-30, y=offset.top+row.top+(row.height-26)/2-lift;
     button.style.left=x+'px';button.style.top=y+'px';button.style.bottom='auto';
     menu.style.bottom=Math.max(12,window.innerHeight-y+8)+'px';
   };
@@ -31,8 +33,9 @@ function reportDockGeometryToCenter(ctx) {
   let timer=0, stopped=false;
   const send=()=>{
     timer=0;if(stopped)return;
-    const row=findDockRow(document,window);if(!row)return;
-    try{window.parent.postMessage({type:'dsh-center:dock',right:row.right,top:row.top,height:row.height,viewport:window.innerHeight},'*');}catch{}
+    const win=window, compact=isCompactCenterViewport(win), lift=compact?46:0, row=findDockRow(document,window);
+    if(!row){ if(compact){try{window.parent.postMessage({type:'dsh-center:dock',right:Math.max(12,win.innerWidth-70),top:Math.max(8,win.innerHeight-120),height:26,viewport:win.innerHeight},'*');}catch{}} return; }
+    try{window.parent.postMessage({type:'dsh-center:dock',right:row.right,top:Math.max(8,row.top-lift),height:row.height,viewport:window.innerHeight},'*');}catch{}
   };
   const schedule=()=>{if(!timer&&!stopped)timer=setTimeout(send,80);};
   const observer=new MutationObserver(schedule);observer.observe(document.body,{childList:true,subtree:true});
