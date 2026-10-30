@@ -1,6 +1,6 @@
 {
   "name": "dsh-center-host",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "type": "module",
   "description": "将当前 DSH 连接到自己的设备中心，远程使用同一份会话。",
   "exports": {
@@ -33,7 +33,7 @@
     "ws": "8.22.0"
   },
   "engines": {
-    "dsh": "0.2.1-rc.3"
+    "dsh": ">=0.2.1-rc.3"
   },
   "license": "MIT",
   "author": "Leo / tula-liuxin",
